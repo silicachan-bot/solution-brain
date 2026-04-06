@@ -1,0 +1,9 @@
+# Common
+.agent/
+.vscode/
+.cursor/
+.claude/
+.venv/
+.env
+**/__pycache__/
+*.log
