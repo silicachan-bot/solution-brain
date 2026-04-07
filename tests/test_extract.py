@@ -105,3 +105,35 @@ class TestDeduplicateAndMerge:
         assert len(updates) == 1
         assert updates[0].id == "existing-1"
         assert updates[0].frequency.recent == 13
+
+
+import os
+import pytest
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LLM_API_KEY"),
+    reason="LLM_API_KEY not set — skipping integration test",
+)
+class TestExtractIntegration:
+    def test_real_extraction(self):
+        """Smoke test: send real comments to LLM and check output structure."""
+        comments = [
+            "这也行...好家伙...",
+            "又来了...好家伙...",
+            "绝了...好家伙...",
+            "笑死我了",
+            "前方高能",
+            "你说得对，但是这个视频确实不错",
+            "up主下次还敢",
+            "建议下次不要建议了",
+            "太真实了",
+            "我直接好家伙",
+        ]
+        results = extract_from_chunk(comments)
+        assert isinstance(results, list)
+        if results:
+            card = results[0]
+            assert card.title
+            assert card.template
+            assert len(card.examples) > 0
