@@ -35,7 +35,6 @@ def _call_llm(prompt: str):
     return client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
     )
 
 

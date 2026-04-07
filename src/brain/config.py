@@ -3,8 +3,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Paths
 SOLUTION_BRAIN_DIR = Path(__file__).resolve().parent.parent.parent
+load_dotenv(SOLUTION_BRAIN_DIR / ".env")
+
 DATA_DIR = SOLUTION_BRAIN_DIR / "data"
 STATE_FILE = DATA_DIR / "state.json"
 CHROMA_DIR = DATA_DIR / "chromadb"
