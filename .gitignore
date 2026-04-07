@@ -7,3 +7,7 @@
 .env
 **/__pycache__/
 *.log
+
+# Runtime data
+data/
+_storage/
