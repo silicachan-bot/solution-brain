@@ -71,6 +71,18 @@ class TestRetriever:
         results = retrieve_patterns(db, "test query", top_k=5)
         assert results == []
 
+    def test_retrieve_respects_top_k(self, tmp_path):
+        db = PatternDB(tmp_path / "chroma")
+        db.save([
+            _make_card("1", "吐槽表达", "对离谱事情表达无奈的吐槽"),
+            _make_card("2", "撒娇语气", "用叠字和语气词表达撒娇"),
+            _make_card("3", "反问句式", "用反问表达不满"),
+        ])
+
+        results = retrieve_patterns(db, "这也太离谱了吧", top_k=1)
+
+        assert len(results) == 1
+
 
 class TestQwenEmbedding:
     def test_call_returns_embeddings(self):

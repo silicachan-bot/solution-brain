@@ -12,7 +12,7 @@
 
 ## 2. 当前可运行的脚本
 
-目前仓库里可直接运行的主脚本只有一个：
+目前仓库里可直接运行的主脚本有两个：
 
 ### `scripts/run_pipeline.py`
 
@@ -49,6 +49,22 @@ uv run python scripts/run_pipeline.py --dry-run
 ```
 
 只跑 ingest + chunk，不调用 LLM，不写入向量库。
+
+### `scripts/streamlit_patterns.py`
+
+用途：可视化查看 ChromaDB 中的 PatternCard，并测试检索效果。
+
+启动：
+
+```bash
+uv run streamlit run scripts/streamlit_patterns.py
+```
+
+功能：
+- 样本浏览
+- 搜索与排序
+- 检索测试
+- 菜单预览
 
 ## 3. 配置方式
 
