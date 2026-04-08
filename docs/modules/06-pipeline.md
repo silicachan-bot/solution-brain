@@ -76,12 +76,14 @@
 
 - 新增或更新后的 Chroma collection
 - 更新后的 `state.json`
-- 终端进度日志
+- Rich Live 实时终端界面（双进度条 + 统计行 + 已完成视频表格）
+- `data/llm_responses.log`：每次 LLM 调用的完整 prompt 与回复
 
 在 `--dry-run` 模式下：
 - 不调用 LLM
 - 不写入 ChromaDB
 - 不更新水位线
+- 使用纯文本输出，不启动 Rich Live
 
 ## 5. 执行流程
 
@@ -137,9 +139,8 @@
 3. 水位线只在整批完成后写一次。
    - 中途失败时，不会保留部分进度。
 
-4. 统计输出偏人读，不是结构化日志。
-   - 当前适合手工运行，不适合直接接日志平台。
+4. 终端使用 Rich Live 实时展示，不是结构化日志。
+   - 适合手工运行观察；LLM 完整回复另存于 `data/llm_responses.log`。
 
-5. `--dry-run` 统计“有评论的视频数”时，会重新读评论：
-   - 见 [scripts/run_pipeline.py:86-87](../../scripts/run_pipeline.py#L86-L87)
+5. `--dry-run` 统计”有评论的视频数”时，会重新读评论：
    - 这是为了简单实现，不是最省 IO 的写法。

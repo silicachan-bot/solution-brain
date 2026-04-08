@@ -49,29 +49,36 @@
 - `examples`
 - `description`
 
-### 3.3 `_call_llm()`
+### 3.3 `_client` 与 `_call_llm_streaming()`
 
-定义在 [src/brain/extract/refiner.py:32-37](../../src/brain/extract/refiner.py#L32-L37)。
+`_client` 是模块级 `OpenAI` 单例，避免每次调用重建连接池。
 
-行为：
-- 使用 OpenAI 兼容接口
-- 读取 `LLM_API_BASE`、`LLM_API_KEY`、`LLM_MODEL`
-- 发起一次 `chat.completions.create(...)`
+`_call_llm_streaming()` 使用流式接口：
+- `stream=True` + `stream_options={"include_usage": True}`
+- 逐 token 调用可选的 `on_token(n)` 回调（`n` 为当前 completion token 累计数）
+- 最后一个 chunk 含 usage 时读取 `prompt_tokens` / `completion_tokens`
+- 返回 `(content: str, prompt_tokens: int, completion_tokens: int)`
+
+`_llm_logger` 为模块级文件日志器，把每次调用的完整 prompt 和模型原始回复写入 `data/llm_responses.log`，不打印到终端。
 
 ### 3.4 `extract_from_chunk()`
 
-定义在 [src/brain/extract/refiner.py:40-80](../../src/brain/extract/refiner.py#L40-L80)。
+签名：`extract_from_chunk(messages, log_label="", on_token=None) -> (list[PatternCard], int)`
+
+`on_token` 是可选回调，每生成一个 token 触发一次，用于调用方实时更新进度显示。
 
 处理过程：
 
 1. 给评论编号
 2. 拼接提示词
-3. 调用 LLM
-4. 读取返回文本
+3. 流式调用 LLM，边生成边触发 `on_token`
+4. 将完整 prompt 与模型回复写入后台日志
 5. 如有 Markdown code fence，则剥掉
 6. `json.loads(...)` 解析
 7. 过滤掉缺字段的项
 8. 为每个有效结果构造 `PatternCard`
+
+返回值为 `(cards, total_tokens)`，`total_tokens=0` 表示 API 未返回用量。
 
 构造 `PatternCard` 时的当前约定：
 - `id`：随机 `pat-xxxxxxxx`
@@ -79,7 +86,7 @@
 - `frequency`：初始四个窗口都设为 1
 - `source`：固定写成 `bilibili`
 
-如果返回不是合法 JSON 或不是数组，当前直接返回空列表。
+如果返回不是合法 JSON 或不是数组，返回 `([], total_tokens)`。
 
 ### 3.5 `deduplicate_and_merge()`
 
@@ -125,9 +132,11 @@ card.title.strip().lower()
 
 输入：
 - 单个评论块 `list[str]`
+- 可选 `log_label: str`
+- 可选 `on_token: Callable[[int], None]`
 
 输出：
-- `list[PatternCard]`
+- `(list[PatternCard], total_tokens: int)`
 
 ### 4.3 合并阶段
 
