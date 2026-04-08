@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 from openai import OpenAI
 
 from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL
 from brain.models import PatternCard, FrequencyProfile
+
+# 模块级单例，避免每次调用重建连接池
+_client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
 
 # File logger for full LLM responses (background log, not printed to console)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,29 +45,54 @@ _EXTRACT_PROMPT = """\
 """
 
 
-def _call_llm(prompt: str):
-    client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
-    return client.chat.completions.create(
+def _call_llm_streaming(
+    prompt: str,
+    on_token: Callable[[int], None] | None = None,
+) -> tuple[str, int, int]:
+    """流式调用 LLM，返回 (content, prompt_tokens, completion_tokens)。
+    on_token(n) 在每个 token 生成后被调用，n 为当前累计 completion token 数。
+    """
+    stream = _client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
+        stream=True,
+        stream_options={"include_usage": True},
     )
+
+    parts: list[str] = []
+    token_count = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            parts.append(chunk.choices[0].delta.content)
+            token_count += 1
+            if on_token:
+                on_token(token_count)
+        # 最后一个 chunk 含 usage（需要 stream_options include_usage）
+        if getattr(chunk, "usage", None):
+            prompt_tokens = chunk.usage.prompt_tokens or 0
+            completion_tokens = chunk.usage.completion_tokens or token_count
+
+    if not completion_tokens:
+        completion_tokens = token_count
+
+    return "".join(parts), prompt_tokens, completion_tokens
 
 
 def extract_from_chunk(
     messages: list[str],
     log_label: str = "",
+    on_token: Callable[[int], None] | None = None,
 ) -> tuple[list[PatternCard], int]:
     """返回 (patterns, total_tokens)。total_tokens=0 表示 API 未返回用量信息。"""
     numbered = "\n".join(f"{i+1}. {m}" for i, m in enumerate(messages))
     prompt = _EXTRACT_PROMPT + numbered
 
-    response = _call_llm(prompt)
-    content = response.choices[0].message.content.strip()
-
-    usage = response.usage
-    total_tokens: int = usage.total_tokens if usage else 0
-    prompt_tokens: int = usage.prompt_tokens if usage else 0
-    completion_tokens: int = usage.completion_tokens if usage else 0
+    content, prompt_tokens, completion_tokens = _call_llm_streaming(prompt, on_token=on_token)
+    content = content.strip()
+    total_tokens = prompt_tokens + completion_tokens
 
     # 写完整回复到后台日志
     _llm_logger.debug(

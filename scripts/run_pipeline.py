@@ -104,6 +104,7 @@ def main():
     total_tokens = 0
     total_patterns = 0
     all_patterns: list = []
+    streaming_tokens = 0  # 当前 chunk 已生成的 token 数（流式实时）
 
     def make_display() -> Group:
         elapsed = time.monotonic() - pipeline_start
@@ -114,6 +115,8 @@ def main():
             f"[dim]累计 tokens[/] [yellow]{total_tokens:,}[/]  "
             f"[dim]发现模式[/] [magenta]{total_patterns}[/]"
         )
+        if streaming_tokens > 0:
+            progress.update(chunk_task, description=f"[green]分块  [dim]⟳ 生成中 {streaming_tokens} tok")
         return Group(progress, stats, completed_table)
 
     with Live(make_display(), refresh_per_second=4, vertical_overflow="visible") as live:
@@ -148,11 +151,18 @@ def main():
             video_patterns: list = []
 
             for j, chunk in enumerate(chunks, 1):
+                streaming_tokens = 0
                 progress.update(chunk_task, description=f"[green]分块 {j}/{len(chunks)}")
                 live.update(make_display())
 
+                def on_token(n: int, _live=live) -> None:
+                    nonlocal streaming_tokens
+                    streaming_tokens = n
+                    if n % 20 == 0:
+                        _live.update(make_display())
+
                 log_label = f"{bvid} chunk {j}/{len(chunks)}"
-                patterns, tokens = extract_from_chunk(chunk, log_label=log_label)
+                patterns, tokens = extract_from_chunk(chunk, log_label=log_label, on_token=on_token)
 
                 video_tokens += tokens
                 total_tokens += tokens
@@ -160,7 +170,9 @@ def main():
                 total_patterns += len(patterns)
                 all_patterns.extend(patterns)
 
+                streaming_tokens = 0
                 progress.advance(chunk_task)
+                progress.update(chunk_task, description=f"[green]分块 {j}/{len(chunks)}")
                 live.update(make_display())
 
             completed_table.add_row(
