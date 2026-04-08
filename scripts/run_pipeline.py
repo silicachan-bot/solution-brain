@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -24,6 +25,18 @@ from brain.extract.chunker import chunk_comments
 from brain.extract.refiner import extract_from_chunk, deduplicate_and_merge
 from brain.store.pattern_db import PatternDB
 from brain.store.embedding import QwenEmbeddingFunction
+
+from rich import box
+from rich.console import Group
+from rich.live import Live
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
+from rich.text import Text
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    m, s = divmod(seconds, 60)
+    return f"{int(m)}m{s:.1f}s" if m else f"{s:.1f}s"
 
 
 def main():
@@ -56,38 +69,111 @@ def main():
         print("没有需要处理的视频。")
         return
 
-    # 3. 逐视频处理
-    all_patterns = []
-    for i, video in enumerate(videos, 1):
-        bvid = video["bvid"]
-        title = video.get("title", "无标题")
-        print(f"\n[{i}/{len(videos)}] {bvid} — {title}")
-
-        comments = reader.read_comments(bvid)
-        print(f"  原始评论: {len(comments)} 条")
-
-        cleaned = clean_comments(comments)
-        print(f"  清洗后: {len(cleaned)} 条")
-
-        if not cleaned:
-            continue
-
-        chunks = chunk_comments(cleaned, chunk_size=args.chunk_size)
-        print(f"  分块: {len(chunks)} 块")
-
-        if args.dry_run:
-            print("  [dry-run] 跳过LLM提取")
-            continue
-
-        for j, chunk in enumerate(chunks, 1):
-            print(f"  提取第 {j}/{len(chunks)} 块...", end=" ", flush=True)
-            patterns = extract_from_chunk(chunk)
-            print(f"发现 {len(patterns)} 个模式")
-            all_patterns.extend(patterns)
-
+    # dry-run: 简单打印不需要 Rich
     if args.dry_run:
-        print(f"\n[dry-run] 共计 {sum(1 for v in videos if reader.read_comments(v['bvid']))} 个视频有评论")
+        for i, video in enumerate(videos, 1):
+            bvid = video["bvid"]
+            comments = reader.read_comments(bvid)
+            cleaned = clean_comments(comments)
+            chunks = chunk_comments(cleaned, chunk_size=args.chunk_size)
+            print(f"[{i}/{len(videos)}] {bvid} — {video.get('title','无标题')}")
+            print(f"  评论: {len(comments)} → 清洗后: {len(cleaned)} → {len(chunks)} 块 [dry-run]")
         return
+
+    # 3. 逐视频处理（Rich 实时展示）
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(bar_width=28),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+    )
+    video_task = progress.add_task("[cyan]视频", total=len(videos))
+    chunk_task = progress.add_task("[green]分块", total=1, visible=False)
+
+    completed_table = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    completed_table.add_column("BV号", style="cyan", no_wrap=True)
+    completed_table.add_column("标题", max_width=26)
+    completed_table.add_column("分块", justify="right")
+    completed_table.add_column("耗时", justify="right", style="green")
+    completed_table.add_column("Tokens", justify="right", style="yellow")
+    completed_table.add_column("模式", justify="right", style="magenta")
+
+    pipeline_start = time.monotonic()
+    total_tokens = 0
+    total_patterns = 0
+    all_patterns: list = []
+
+    def make_display() -> Group:
+        elapsed = time.monotonic() - pipeline_start
+        h, rem = divmod(int(elapsed), 3600)
+        m, s = divmod(rem, 60)
+        stats = Text.from_markup(
+            f"[dim]总耗时[/] [green]{h:02d}:{m:02d}:{s:02d}[/]  "
+            f"[dim]累计 tokens[/] [yellow]{total_tokens:,}[/]  "
+            f"[dim]发现模式[/] [magenta]{total_patterns}[/]"
+        )
+        return Group(progress, stats, completed_table)
+
+    with Live(make_display(), refresh_per_second=4, vertical_overflow="visible") as live:
+        for i, video in enumerate(videos, 1):
+            bvid = video["bvid"]
+            title = video.get("title", "无标题")
+
+            progress.update(video_task, description=f"[cyan]视频  {bvid} — {title[:20]}")
+            live.update(make_display())
+
+            comments = reader.read_comments(bvid)
+            cleaned = clean_comments(comments)
+
+            if not cleaned:
+                progress.advance(video_task)
+                live.update(make_display())
+                continue
+
+            chunks = chunk_comments(cleaned, chunk_size=args.chunk_size)
+
+            progress.update(
+                chunk_task,
+                total=len(chunks),
+                completed=0,
+                visible=True,
+                description="[green]分块",
+            )
+            live.update(make_display())
+
+            video_start = time.monotonic()
+            video_tokens = 0
+            video_patterns: list = []
+
+            for j, chunk in enumerate(chunks, 1):
+                progress.update(chunk_task, description=f"[green]分块 {j}/{len(chunks)}")
+                live.update(make_display())
+
+                log_label = f"{bvid} chunk {j}/{len(chunks)}"
+                patterns, tokens = extract_from_chunk(chunk, log_label=log_label)
+
+                video_tokens += tokens
+                total_tokens += tokens
+                video_patterns.extend(patterns)
+                total_patterns += len(patterns)
+                all_patterns.extend(patterns)
+
+                progress.advance(chunk_task)
+                live.update(make_display())
+
+            completed_table.add_row(
+                bvid,
+                (title[:25] + "…") if len(title) > 25 else title,
+                str(len(chunks)),
+                _fmt_elapsed(time.monotonic() - video_start),
+                f"{video_tokens:,}",
+                str(len(video_patterns)),
+            )
+            progress.advance(video_task)
+            progress.update(chunk_task, visible=False)
+            live.update(make_display())
 
     # 4. 去重合并
     print(f"\n提取到的原始模式: {len(all_patterns)} 个")
@@ -107,7 +193,7 @@ def main():
         print(f"水位线更新至: {last_bvid}")
 
     total = len(existing) + len(new_cards)
-    print(f"\n完成。数据库中模式总数: {total}")
+    print(f"完成。数据库中模式总数: {total}")
 
 
 if __name__ == "__main__":
