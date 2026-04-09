@@ -23,7 +23,6 @@ class FrequencyProfile:
 @dataclass
 class PatternCard:
     id: str
-    title: str
     description: str
     template: str
     examples: list[str]
@@ -35,7 +34,6 @@ class PatternCard:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "title": self.title,
             "description": self.description,
             "template": self.template,
             "examples": self.examples,
@@ -55,7 +53,6 @@ class PatternCard:
         freq = d["frequency"]
         return cls(
             id=d["id"],
-            title=d["title"],
             description=d["description"],
             template=d["template"],
             examples=d["examples"],
@@ -69,6 +66,11 @@ class PatternCard:
             created_at=datetime.fromisoformat(d["created_at"]),
             updated_at=datetime.fromisoformat(d["updated_at"]),
         )
+
+    def embed_text(self) -> str:
+        """语义检索用的 embedding 文本（description + examples）。"""
+        examples_text = " / ".join(self.examples)
+        return f"{self.description} 例句：{examples_text}"
 
 
 @dataclass

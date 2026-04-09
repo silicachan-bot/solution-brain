@@ -1,10 +1,13 @@
 import json
-from unittest.mock import patch, MagicMock
+import os
+from unittest.mock import patch
 from datetime import datetime
+
+import pytest
 
 from brain.models import CleanedComment, PatternCard, FrequencyProfile
 from brain.extract.chunker import chunk_comments
-from brain.extract.refiner import extract_from_chunk, deduplicate_and_merge
+from brain.extract.refiner import extract_from_chunk, _judge_duplicate_topn, deduplicate_and_merge
 
 
 def _make_comment(rpid: int, message: str) -> CleanedComment:
@@ -40,75 +43,140 @@ class TestExtractFromChunk:
     def test_parses_llm_response(self):
         mock_patterns = [
             {
-                "title": "好家伙式吐槽",
                 "template": "[A]...好家伙...",
                 "examples": ["这也行...好家伙...", "又来了...好家伙..."],
                 "description": "表达无奈和吐槽",
             }
         ]
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = json.dumps(mock_patterns, ensure_ascii=False)
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=(json.dumps(mock_patterns, ensure_ascii=False), 10, 50),
+        ):
+            cards, total_tokens = extract_from_chunk(["comment1", "comment2"])
 
-        with patch("brain.extract.refiner._call_llm", return_value=mock_response):
-            results = extract_from_chunk(["comment1", "comment2"])
-
-        assert len(results) == 1
-        assert results[0].title == "好家伙式吐槽"
-        assert results[0].template == "[A]...好家伙..."
+        assert len(cards) == 1
+        assert cards[0].template == "[A]...好家伙..."
 
     def test_handles_empty_response(self):
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "[]"
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=("[]", 5, 3),
+        ):
+            cards, total_tokens = extract_from_chunk(["comment1", "comment2"])
 
-        with patch("brain.extract.refiner._call_llm", return_value=mock_response):
-            results = extract_from_chunk(["comment1", "comment2"])
-
-        assert results == []
+        assert cards == []
+        assert total_tokens == 8
 
 
 class TestDeduplicateAndMerge:
-    def _make_card(self, id: str, title: str, recent: int = 5) -> PatternCard:
+    def _make_card(self, cid: str, template: str, description: str = "默认",
+                   examples: list[str] | None = None) -> PatternCard:
         return PatternCard(
-            id=id,
-            title=title,
-            description=f"desc for {title}",
-            template=f"[A] {title}",
-            examples=[f"example of {title}"],
-            frequency=FrequencyProfile(recent=recent, medium=recent, long_term=recent, total=recent),
+            id=cid, description=description,
+            template=template, examples=examples or ["示例"],
+            frequency=FrequencyProfile(1, 1, 1, 1),
             source="test",
             created_at=datetime(2026, 1, 1),
             updated_at=datetime(2026, 1, 1),
         )
 
-    def test_no_duplicates(self):
-        cards = [self._make_card("1", "pattern A"), self._make_card("2", "pattern B")]
-        new, updates = deduplicate_and_merge(cards, existing=[])
+    def test_no_duplicates(self, tmp_path):
+        embedder = MockEmbedder()
+        db = PatternDB(tmp_path / "lance", embedder=embedder)
+        cards = [
+            self._make_card("1", "[A]不同A", description="descA", examples=["exA"]),
+            self._make_card("2", "[A]不同B", description="descB", examples=["exB"]),
+        ]
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+            new, updates = deduplicate_and_merge(cards, db, embedder)
         assert len(new) == 2
         assert len(updates) == 0
 
-    def test_merges_similar_new_cards(self):
+    def test_intra_batch_dedup(self, tmp_path):
+        embedder = MockEmbedder()
+        db = PatternDB(tmp_path / "lance", embedder=embedder)
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽", ["好家伙"]
         cards = [
-            self._make_card("1", "好家伙式吐槽", recent=3),
-            self._make_card("2", "好家伙式吐槽", recent=5),
+            self._make_card("1", same_tmpl, description=same_desc, examples=same_ex),
+            self._make_card("2", same_tmpl, description=same_desc, examples=same_ex),
         ]
-        new, updates = deduplicate_and_merge(cards, existing=[])
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+            new, updates = deduplicate_and_merge(cards, db, embedder)
         assert len(new) == 1
-        assert new[0].frequency.recent == 8
+        assert len(updates) == 0
 
-    def test_updates_existing_pattern(self):
-        existing = [self._make_card("existing-1", "好家伙式吐槽", recent=10)]
-        new_cards = [self._make_card("new-1", "好家伙式吐槽", recent=3)]
-        new, updates = deduplicate_and_merge(new_cards, existing=existing)
+    def test_cross_db_dedup(self, tmp_path):
+        embedder = MockEmbedder()
+        db = PatternDB(tmp_path / "lance", embedder=embedder)
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽", ["好家伙"]
+        existing = self._make_card("existing-1", same_tmpl, description=same_desc, examples=same_ex)
+        existing.frequency = FrequencyProfile(10, 10, 10, 10)
+        db.save([existing])
+
+        new_card = self._make_card("new-1", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+            new, updates = deduplicate_and_merge([new_card], db, embedder)
         assert len(new) == 0
         assert len(updates) == 1
         assert updates[0].id == "existing-1"
-        assert updates[0].frequency.recent == 13
+        assert updates[0].frequency.total == 11
 
 
-import os
-import pytest
+class TestJudgeDuplicateTopN:
+    def _make_card(self, cid: str, template: str, description: str = "默认描述") -> PatternCard:
+        return PatternCard(
+            id=cid, description=description,
+            template=template, examples=["示例"],
+            frequency=FrequencyProfile(1, 1, 1, 1),
+            source="test",
+            created_at=datetime(2026, 1, 1),
+            updated_at=datetime(2026, 1, 1),
+        )
+
+    def test_finds_duplicate_in_candidates(self):
+        resp = '{"duplicate_of": 1, "keep_description": "candidate", "reason": "same"}'
+        with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
+            idx, keep = _judge_duplicate_topn(
+                self._make_card("new", "[A]好家伙"),
+                [self._make_card("c1", "[A]好家伙[B]"), self._make_card("c2", "[A]绝了")],
+            )
+        assert idx == 0
+        assert keep == "candidate"
+
+    def test_no_duplicate_returns_none(self):
+        resp = '{"duplicate_of": 0, "keep_description": "current", "reason": "all different"}'
+        with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
+            idx, keep = _judge_duplicate_topn(
+                self._make_card("new", "[A]好家伙"),
+                [self._make_card("c1", "[A]绝了")],
+            )
+        assert idx is None
+
+    def test_parse_error_returns_none(self):
+        with patch("brain.extract.refiner._call_llm_streaming", return_value=("bad json", 5, 5)):
+            idx, keep = _judge_duplicate_topn(
+                self._make_card("new", "[A]好家伙"),
+                [self._make_card("c1", "[A]绝了")],
+            )
+        assert idx is None
+        assert keep == "current"
+
+    def test_handles_markdown_code_fence(self):
+        resp = '```json\n{"duplicate_of": 2, "keep_description": "current", "reason": "same"}\n```'
+        with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
+            idx, keep = _judge_duplicate_topn(
+                self._make_card("new", "[A]好家伙"),
+                [self._make_card("c1", "[A]绝了"), self._make_card("c2", "[A]好家伙[B]")],
+            )
+        assert idx == 1
+        assert keep == "current"
+
+    def test_empty_candidates_returns_none(self):
+        idx, keep = _judge_duplicate_topn(
+            self._make_card("new", "[A]好家伙"),
+            [],
+        )
+        assert idx is None
 
 
 @pytest.mark.skipif(
@@ -130,10 +198,151 @@ class TestExtractIntegration:
             "太真实了",
             "我直接好家伙",
         ]
-        results = extract_from_chunk(comments)
-        assert isinstance(results, list)
-        if results:
-            card = results[0]
-            assert card.title
+        cards, _ = extract_from_chunk(comments)
+        assert isinstance(cards, list)
+        if cards:
+            card = cards[0]
             assert card.template
             assert len(card.examples) > 0
+
+
+from brain.extract.refiner import _dedup_intra_batch
+from brain.extract.refiner import _dedup_against_db
+from brain.store.pattern_db import PatternDB
+from helpers import MockEmbedder
+
+
+class TestIntraBatchDedup:
+    def _make_card(self, cid: str, template: str, description: str = "默认描述",
+                   examples: list[str] | None = None) -> PatternCard:
+        return PatternCard(
+            id=cid, description=description,
+            template=template, examples=examples or ["示例"],
+            frequency=FrequencyProfile(1, 1, 1, 1),
+            source="test",
+            created_at=datetime(2026, 1, 1),
+            updated_at=datetime(2026, 1, 1),
+        )
+
+    def test_single_card_passes_through(self):
+        embedder = MockEmbedder()
+        card = self._make_card("1", "[A]模式")
+        result = _dedup_intra_batch([card], embedder, top_n=3)
+        assert len(result) == 1
+        assert result[0].id == "1"
+
+    def test_different_cards_both_kept(self):
+        embedder = MockEmbedder()
+        card_a = self._make_card("1", "[A]完全不同A", description="descA", examples=["exA"])
+        card_b = self._make_card("2", "[A]完全不同B", description="descB", examples=["exB"])
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+        assert len(result) == 2
+
+    def test_duplicate_cards_merged(self):
+        embedder = MockEmbedder()
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
+        card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+        assert len(result) == 1
+        assert result[0].id == "1"
+        assert result[0].frequency.total == 2
+
+    def test_description_updated_when_keep_current(self):
+        embedder = MockEmbedder()
+        same_tmpl, same_ex = "[A]好家伙", ["好家伙"]
+        card_a = self._make_card("1", same_tmpl, description="旧描述", examples=same_ex)
+        card_b = self._make_card("2", same_tmpl, description="旧描述", examples=same_ex)
+        card_b.description = "更好的描述"
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+        assert len(result) == 1
+        assert result[0].description == "更好的描述"
+
+    def test_non_duplicate_keeps_both(self):
+        embedder = MockEmbedder()
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
+        card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+        assert len(result) == 2
+
+
+class TestCrossDbDedup:
+    def _make_card(self, cid: str, template: str, description: str = "默认描述",
+                   examples: list[str] | None = None) -> PatternCard:
+        return PatternCard(
+            id=cid, description=description,
+            template=template, examples=examples or ["示例"],
+            frequency=FrequencyProfile(1, 1, 1, 1),
+            source="test",
+            created_at=datetime(2026, 1, 1),
+            updated_at=datetime(2026, 1, 1),
+        )
+
+    def test_empty_db_returns_all_as_new(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        cards = [self._make_card("1", "[A]模式A"), self._make_card("2", "[A]模式B")]
+        new, updates = _dedup_against_db(cards, db, top_n=3)
+        assert len(new) == 2
+        assert len(updates) == 0
+
+    def test_similar_to_existing_triggers_llm_and_updates(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        existing = self._make_card("existing-1", same_tmpl, description=same_desc, examples=same_ex)
+        existing.frequency = FrequencyProfile(5, 5, 5, 5)
+        db.save([existing])
+
+        new_card = self._make_card("new-1", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+            new, updates = _dedup_against_db([new_card], db, top_n=3)
+
+        assert len(new) == 0
+        assert len(updates) == 1
+        assert updates[0].id == "existing-1"
+        assert updates[0].frequency.total == 6
+
+    def test_different_from_existing_added_as_new(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        existing = self._make_card("existing-1", "[A]完全不同A", description="descA", examples=["exA"])
+        db.save([existing])
+
+        new_card = self._make_card("new-1", "[A]完全不同B", description="descB", examples=["exB"])
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+            new, updates = _dedup_against_db([new_card], db, top_n=3)
+
+        assert len(new) == 1
+        assert len(updates) == 0
+
+    def test_description_updated_when_keep_current(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        existing = self._make_card("existing-1", same_tmpl, description="旧描述", examples=same_ex)
+        db.save([existing])
+
+        new_card = self._make_card("new-1", same_tmpl, description="更好的新描述", examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+            new, updates = _dedup_against_db([new_card], db, top_n=3)
+
+        assert len(updates) == 1
+        assert updates[0].description == "更好的新描述"
+
+    def test_two_new_cards_merge_into_same_existing(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        existing = self._make_card("existing-1", same_tmpl, description=same_desc, examples=same_ex)
+        existing.frequency = FrequencyProfile(5, 5, 5, 5)
+        db.save([existing])
+
+        card_x = self._make_card("x", same_tmpl, description=same_desc, examples=same_ex)
+        card_y = self._make_card("y", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+            new, updates = _dedup_against_db([card_x, card_y], db, top_n=3)
+
+        assert len(new) == 0
+        assert len(updates) == 1
+        assert updates[0].frequency.total == 7

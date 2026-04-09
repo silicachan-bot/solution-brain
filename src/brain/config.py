@@ -11,7 +11,7 @@ load_dotenv(SOLUTION_BRAIN_DIR / ".env")
 
 DATA_DIR = SOLUTION_BRAIN_DIR / "data"
 STATE_FILE = DATA_DIR / "state.json"
-CHROMA_DIR = DATA_DIR / "chromadb"
+LANCEDB_DIR = DATA_DIR / "lancedb"
 
 BILIBILI_DB_PATH = Path(
     os.environ.get(
@@ -39,3 +39,4 @@ MIN_COMMENT_LENGTH = int(os.environ.get("MIN_COMMENT_LENGTH", "5"))
 RETRIEVAL_TOP_K = int(os.environ.get("RETRIEVAL_TOP_K", "8"))
 SIMILARITY_WEIGHT = 0.6
 FRESHNESS_WEIGHT = 0.4
+DEDUP_TOP_N = int(os.environ.get("DEDUP_TOP_N", "3"))

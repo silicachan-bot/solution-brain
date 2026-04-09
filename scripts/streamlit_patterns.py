@@ -8,7 +8,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from brain.compose.menu import build_menu
-from brain.config import CHROMA_DIR, RETRIEVAL_TOP_K
+from brain.config import LANCEDB_DIR, RETRIEVAL_TOP_K
 from brain.store.pattern_db import PatternDB
 from brain.store.retriever import retrieve_patterns
 from brain.viewer import filter_patterns, format_pattern_summary, sort_patterns
@@ -21,13 +21,12 @@ st.caption("查看 PatternCard 样本，检查提取质量，并测试检索效�
 
 @st.cache_resource
 def get_db() -> PatternDB:
-    return PatternDB(CHROMA_DIR)
+    return PatternDB(LANCEDB_DIR)
 
 
 def render_pattern_card(card) -> None:
     with st.expander(format_pattern_summary(card), expanded=False):
         st.markdown(f"**ID**: `{card.id}`")
-        st.markdown(f"**标题**: {card.title}")
         st.markdown(f"**模板**: `{card.template}`")
         st.markdown(f"**描述**: {card.description}")
         st.markdown(f"**来源**: {card.source}")
@@ -53,7 +52,7 @@ def main() -> None:
         db = get_db()
         all_patterns = db.list_all()
     except Exception as exc:
-        st.error(f"读取 ChromaDB 失败：{exc}")
+        st.error(f"读取数据库失败：{exc}")
         return
 
     st.metric("PatternCard 总数", len(all_patterns))
@@ -67,15 +66,15 @@ def main() -> None:
     with browse_tab:
         search_query = st.text_input(
             "搜索 PatternCard",
-            placeholder="按标题、模板、描述或例句搜索",
+            placeholder="按模板、描述或例句搜索",
         )
         sort_by = st.selectbox(
             "排序方式",
-            options=["updated_at", "freshness", "title"],
+            options=["updated_at", "freshness", "template"],
             format_func=lambda x: {
                 "updated_at": "最近更新",
                 "freshness": "热度 freshness",
-                "title": "标题",
+                "template": "模板",
             }[x],
         )
 

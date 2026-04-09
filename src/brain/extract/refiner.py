@@ -8,11 +8,18 @@ from datetime import datetime
 
 from openai import OpenAI
 
-from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL
+import tempfile
+
+import lancedb
+import pyarrow as pa
+from rich.console import Console
+
+from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL, DEDUP_TOP_N, EMBED_DIMENSIONS
 from brain.models import PatternCard, FrequencyProfile
 
 # 模块级单例，避免每次调用重建连接池
 _client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
+_console = Console()
 
 # File logger for full LLM responses (background log, not printed to console)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,7 +39,6 @@ _EXTRACT_PROMPT = """\
 
 对每个发现的模式，输出 JSON 数组，每个元素包含：
 {
-  "title": "简短标题",
   "template": "含 [A] [B] 占位符的模板句",
   "examples": ["2-5个真实例句"],
   "description": "模式描述：是什么、什么时候用、传达什么感觉"
@@ -79,6 +85,78 @@ def _call_llm_streaming(
         completion_tokens = token_count
 
     return "".join(parts), prompt_tokens, completion_tokens
+
+
+_DEDUP_JUDGE_PROMPT = """\
+以下是一个从 B 站评论中提取的语言模式（当前模式），以及若干个从数据库中检索到的相似候选。
+请判断候选中是否有与当前模式描述同一种语言模式的条目（语义等价或高度相似，可以合并为一条记录）。
+
+【当前模式】
+模板: {current_template}
+描述: {current_desc}
+例句: {current_examples}
+
+【相似候选】
+{candidates_block}
+
+如果候选中有重复的，请选出最佳匹配（只选一个）。如果都不重复，输出 0。
+
+输出 JSON:
+{{
+  "duplicate_of": 0,
+  "keep_description": "current" 或 "candidate",
+  "reason": "一句话说明"
+}}
+
+duplicate_of: 候选编号（1 开始），0 表示无重复。
+keep_description: 哪一方的描述更完整准确，仅在有重复时有意义。
+只输出 JSON，不要其他文字。
+"""
+
+
+def _judge_duplicate_topn(
+    card: PatternCard,
+    candidates: list[PatternCard],
+) -> tuple[int | None, str]:
+    """询问 LLM 候选中是否有和 card 重复的模式。
+    返回 (candidate_index_0based | None, keep_description: 'current'|'candidate')。
+    解析失败或无重复返回 (None, 'current')。
+    """
+    if not candidates:
+        return None, "current"
+
+    parts = []
+    for i, c in enumerate(candidates, 1):
+        parts.append(
+            f"--- 候选 {i} ({c.id}) ---\n"
+            f"模板: {c.template}\n"
+            f"描述: {c.description}\n"
+            f"例句: {' / '.join(c.examples[:3])}"
+        )
+    candidates_block = "\n".join(parts)
+
+    prompt = _DEDUP_JUDGE_PROMPT.format(
+        current_template=card.template,
+        current_desc=card.description,
+        current_examples=" / ".join(card.examples[:3]),
+        candidates_block=candidates_block,
+    )
+    content, _, _ = _call_llm_streaming(prompt)
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+    try:
+        result = json.loads(content)
+        dup_of = int(result.get("duplicate_of", 0))
+        keep = str(result.get("keep_description", "current"))
+        if dup_of < 1 or dup_of > len(candidates):
+            return None, "current"
+        return dup_of - 1, keep
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return None, "current"
 
 
 def extract_from_chunk(
@@ -130,12 +208,11 @@ def extract_from_chunk(
     now = datetime.now()
     cards = []
     for p in raw_patterns:
-        if not all(k in p for k in ("title", "template", "examples", "description")):
+        if not all(k in p for k in ("template", "examples", "description")):
             continue
         cards.append(
             PatternCard(
                 id=f"pat-{uuid.uuid4().hex[:8]}",
-                title=p["title"],
                 description=p["description"],
                 template=p["template"],
                 examples=p["examples"][:5],
@@ -148,39 +225,178 @@ def extract_from_chunk(
     return cards, total_tokens
 
 
+def _merge_hits(
+    hits_a: list[tuple[PatternCard, float]],
+    hits_b: list[tuple[PatternCard, float]],
+) -> list[PatternCard]:
+    """合并两路检索结果，按 card.id 去重。"""
+    seen: dict[str, PatternCard] = {}
+    for card, _ in hits_a + hits_b:
+        if card.id not in seen:
+            seen[card.id] = card
+    return list(seen.values())
+
+
+def _dedup_intra_batch(
+    cards: list[PatternCard],
+    embedder,
+    top_n: int = DEDUP_TOP_N,
+) -> list[PatternCard]:
+    """批次内去重：用临时 LanceDB 表做双路检索（vec_template + vec_semantic），
+    合并候选后交 LLM 判重。日志并列输出两路结果。
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_db = lancedb.connect(tmp_dir)
+        schema = pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("json", pa.string()),
+            pa.field("vec_template", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
+            pa.field("vec_semantic", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
+        ])
+        tmp_table = None
+        kept: dict[str, PatternCard] = {}
+
+        for card in cards:
+            vec_t = embedder.embed([card.template])[0]
+            vec_s = embedder.embed([card.embed_text()])[0]
+            row = {
+                "id": card.id,
+                "json": json.dumps(card.to_dict(), ensure_ascii=False),
+                "vec_template": vec_t,
+                "vec_semantic": vec_s,
+            }
+
+            if tmp_table is None:
+                tmp_table = tmp_db.create_table("batch", [row], schema=schema)
+                kept[card.id] = card
+                continue
+
+            n = min(top_n, tmp_table.count_rows())
+
+            # 双路检索
+            hits_tmpl = [
+                (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
+                for r in tmp_table.search(vec_t, vector_column_name="vec_template")
+                    .metric("cosine").limit(n).to_list()
+            ]
+            hits_sem = [
+                (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
+                for r in tmp_table.search(vec_s, vector_column_name="vec_semantic")
+                    .metric("cosine").limit(n).to_list()
+            ]
+            merged = _merge_hits(hits_tmpl, hits_sem)
+
+            tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl)
+            sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem)
+            _console.print(f"批次内  [cyan]{card.template!r}[/cyan]")
+            _console.print(f"  vec_template: {tmpl_str}")
+            _console.print(f"  vec_semantic: {sem_str}")
+            _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
+
+            dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+            if dup_idx is not None:
+                matched = merged[dup_idx]
+                target = kept[matched.id]
+                if keep_desc == "current":
+                    target.description = card.description
+                _merge_into(target, card)
+                # 更新临时表中的记录
+                new_vec_s = embedder.embed([target.embed_text()])[0]
+                tmp_table.merge_insert("id") \
+                    .when_matched_update_all() \
+                    .when_not_matched_insert_all() \
+                    .execute([{
+                        "id": target.id,
+                        "json": json.dumps(target.to_dict(), ensure_ascii=False),
+                        "vec_template": embedder.embed([target.template])[0],
+                        "vec_semantic": new_vec_s,
+                    }])
+                _console.print(
+                    f"  [green]→ LLM: 与 {matched.template!r} 重复"
+                    f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
+                    f" · 合并[/green]"
+                )
+                continue
+
+            _console.print(f"  [dim]→ LLM: 无重复，保留[/dim]")
+            tmp_table.add([row])
+            kept[card.id] = card
+
+    return list(kept.values())
+
+
+def _dedup_against_db(
+    cards: list[PatternCard],
+    db,
+    top_n: int = DEDUP_TOP_N,
+) -> tuple[list[PatternCard], list[PatternCard]]:
+    """入库前去重：每张新卡片对 DB 做双路检索（vec_template + vec_semantic），
+    合并候选后交 LLM 判重。若多张新卡片都与同一已有卡片重复，合并到同一对象上。
+    日志并列输出两路结果。
+    """
+    new_cards: list[PatternCard] = []
+    updates_by_id: dict[str, PatternCard] = {}
+
+    for card in cards:
+        hits_tmpl = db.query_by_template(card.template, top_k=top_n)
+        hits_sem = db.query_by_semantic(card.embed_text(), top_k=top_n)
+
+        if not hits_tmpl and not hits_sem:
+            new_cards.append(card)
+            continue
+
+        merged = _merge_hits(hits_tmpl, hits_sem)
+
+        tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl) or "(空)"
+        sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem) or "(空)"
+        _console.print(f"入库去重  [cyan]{card.template!r}[/cyan]")
+        _console.print(f"  vec_template: {tmpl_str}")
+        _console.print(f"  vec_semantic: {sem_str}")
+        _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
+
+        dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+        if dup_idx is not None:
+            matched = merged[dup_idx]
+            target = updates_by_id.get(matched.id, matched)
+            if keep_desc == "current":
+                target.description = card.description
+            _merge_into(target, card)
+            updates_by_id[target.id] = target
+            _console.print(
+                f"  [green]→ LLM: 与 {matched.template!r} ({matched.id}) 重复"
+                f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
+                f" · 更新已有[/green]"
+            )
+            continue
+
+        _console.print(f"  [dim]→ LLM: 无重复，新增[/dim]")
+        new_cards.append(card)
+
+    return new_cards, list(updates_by_id.values())
+
+
 def deduplicate_and_merge(
     cards: list[PatternCard],
-    existing: list[PatternCard],
+    db,
+    embedder,
+    top_n: int = DEDUP_TOP_N,
 ) -> tuple[list[PatternCard], list[PatternCard]]:
-    """Deduplicate new cards among themselves and against existing patterns.
-
-    Returns (new_cards, updated_existing_cards).
-    Uses title matching for dedup (MVP; could use embedding similarity later).
+    """两阶段去重：批次内相互去重 → 入库前与 DB 比对。
+    使用 LanceDB 双向量列（vec_template + vec_semantic）做双路检索。
+    返回 (new_cards, updated_existing_cards)。
     """
-    existing_by_title: dict[str, PatternCard] = {}
-    for card in existing:
-        existing_by_title[card.title.strip().lower()] = card
+    _console.print(f"\n[bold]开始去重[/bold]: {len(cards)} 个待入库模式，top_n={top_n}")
 
-    merged: dict[str, PatternCard] = {}
-    for card in cards:
-        key = card.title.strip().lower()
-        if key in merged:
-            _merge_into(merged[key], card)
-        else:
-            merged[key] = card
+    deduped = _dedup_intra_batch(cards, embedder, top_n)
+    _console.print(f"\n批次内去重完成: {len(cards)} → [bold]{len(deduped)}[/bold] 个\n")
 
-    new_cards: list[PatternCard] = []
-    updated: list[PatternCard] = []
+    new_cards, updates = _dedup_against_db(deduped, db, top_n)
+    _console.print(
+        f"\n去重完成: 新增 [green]{len(new_cards)}[/green] 个,"
+        f" 更新 [yellow]{len(updates)}[/yellow] 个"
+    )
 
-    for key, card in merged.items():
-        if key in existing_by_title:
-            target = existing_by_title[key]
-            _merge_into(target, card)
-            updated.append(target)
-        else:
-            new_cards.append(card)
-
-    return new_cards, updated
+    return new_cards, updates
 
 
 def _merge_into(target: PatternCard, source: PatternCard) -> None:

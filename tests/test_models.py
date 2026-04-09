@@ -26,7 +26,6 @@ class TestPatternCard:
         fp = FrequencyProfile(recent=10, medium=20, long_term=50, total=80)
         card = PatternCard(
             id="pat-001",
-            title="test pattern",
             description="a test",
             template="[A] test",
             examples=["hello test", "world test"],
@@ -36,7 +35,7 @@ class TestPatternCard:
             updated_at=datetime(2026, 1, 1),
         )
         assert card.id == "pat-001"
-        assert card.title == "test pattern"
+        assert card.template == "[A] test"
         assert len(card.examples) == 2
         assert card.frequency.freshness > 0
 
@@ -44,7 +43,6 @@ class TestPatternCard:
         fp = FrequencyProfile(recent=5, medium=10, long_term=30, total=45)
         card = PatternCard(
             id="pat-002",
-            title="roundtrip",
             description="test roundtrip",
             template="[A]...[B]",
             examples=["x...y"],
@@ -56,8 +54,25 @@ class TestPatternCard:
         d = card.to_dict()
         restored = PatternCard.from_dict(d)
         assert restored.id == card.id
-        assert restored.title == card.title
+        assert restored.template == card.template
         assert restored.frequency.recent == card.frequency.recent
+
+    def test_embed_text(self):
+        fp = FrequencyProfile(recent=1, medium=1, long_term=1, total=1)
+        card = PatternCard(
+            id="pat-003",
+            description="test embed text",
+            template="[A] test",
+            examples=["ex1", "ex2"],
+            frequency=fp,
+            source="test",
+            created_at=datetime(2026, 1, 1),
+            updated_at=datetime(2026, 1, 1),
+        )
+        text = card.embed_text()
+        assert "test embed text" in text
+        assert "ex1" in text
+        assert "ex2" in text
 
 
 class TestCleanedComment:

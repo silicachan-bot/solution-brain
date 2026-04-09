@@ -9,5 +9,5 @@ def build_menu(patterns: list[PatternCard]) -> str:
 
     lines = []
     for i, p in enumerate(patterns, 1):
-        lines.append(f'{i}. [{p.id}] {p.title} — "{p.template}"')
+        lines.append(f'{i}. [{p.id}] "{p.template}" — {p.description[:30]}')
     return "\n".join(lines)

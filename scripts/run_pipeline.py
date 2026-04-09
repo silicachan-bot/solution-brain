@@ -17,14 +17,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from brain.config import BILIBILI_DB_PATH, CHROMA_DIR, CHUNK_SIZE, STATE_FILE
+from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, STATE_FILE
 from brain.ingest.reader import BilibiliReader
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.state import WatermarkState
 from brain.extract.chunker import chunk_comments
 from brain.extract.refiner import extract_from_chunk, deduplicate_and_merge
 from brain.store.pattern_db import PatternDB
-from brain.store.embedding import QwenEmbeddingFunction
+from brain.store.embedding import QwenEmbedder
 
 from rich import box
 from rich.console import Group
@@ -49,7 +49,8 @@ def main():
 
     reader = BilibiliReader(BILIBILI_DB_PATH)
     state = WatermarkState(STATE_FILE)
-    db = PatternDB(CHROMA_DIR, embedding_fn=QwenEmbeddingFunction())
+    embedder = QwenEmbedder()
+    db = PatternDB(LANCEDB_DIR, embedder=embedder)
 
     # 1. 列出视频
     videos = reader.list_videos()
@@ -189,10 +190,9 @@ def main():
 
     # 4. 去重合并
     print(f"\n提取到的原始模式: {len(all_patterns)} 个")
-    existing = db.list_all()
-    print(f"数据库中已有模式: {len(existing)} 个")
+    print(f"数据库中已有模式: {db.count()} 个")
 
-    new_cards, updates = deduplicate_and_merge(all_patterns, existing)
+    new_cards, updates = deduplicate_and_merge(all_patterns, db, embedder)
     print(f"新模式: {len(new_cards)} 个, 更新: {len(updates)} 个")
 
     db.save(new_cards)
@@ -204,7 +204,7 @@ def main():
         state.set_watermark("bilibili", last_bvid)
         print(f"水位线更新至: {last_bvid}")
 
-    total = len(existing) + len(new_cards)
+    total = db.count()
     print(f"完成。数据库中模式总数: {total}")
 
 

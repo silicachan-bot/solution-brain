@@ -10,7 +10,7 @@ def retrieve_patterns(
     conversation_text: str,
     top_k: int = RETRIEVAL_TOP_K,
 ) -> list[PatternCard]:
-    raw_results = db.query(conversation_text, top_k=top_k * 2)
+    raw_results = db.query_by_semantic(conversation_text, top_k=top_k * 2)
     if not raw_results:
         return []
 

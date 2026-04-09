@@ -3,75 +3,122 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import chromadb
+import lancedb
+import pyarrow as pa
 
+from brain.config import EMBED_DIMENSIONS
 from brain.models import PatternCard
 
 
 class PatternDB:
-    COLLECTION_NAME = "patterns"
+    TABLE_NAME = "patterns"
 
-    def __init__(self, persist_dir: Path | str, embedding_fn=None):
+    def __init__(self, persist_dir: Path | str, embedder=None):
         self.persist_dir = Path(persist_dir)
-        self._client = chromadb.PersistentClient(path=str(self.persist_dir))
-        self._embedding_fn = embedding_fn
-        kwargs = {
-            "name": self.COLLECTION_NAME,
-            "metadata": {"hnsw:space": "cosine"},
-        }
-        if self._embedding_fn is not None:
-            kwargs["embedding_function"] = self._embedding_fn
-        self._collection = self._client.get_or_create_collection(**kwargs)
+        self._db = lancedb.connect(str(self.persist_dir))
+        self._embedder = embedder
+        self._table = None
+        if self.TABLE_NAME in self._db.list_tables():
+            self._table = self._db.open_table(self.TABLE_NAME)
+
+    def _make_schema(self) -> pa.Schema:
+        return pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("json", pa.string()),
+            pa.field("vec_template", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
+            pa.field("vec_semantic", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
+        ])
+
+    def _cards_to_data(self, cards: list[PatternCard]) -> list[dict]:
+        templates = [c.template for c in cards]
+        semantics = [c.embed_text() for c in cards]
+        vec_t = self._embedder.embed(templates)
+        vec_s = self._embedder.embed(semantics)
+        return [
+            {
+                "id": c.id,
+                "json": json.dumps(c.to_dict(), ensure_ascii=False),
+                "vec_template": vt,
+                "vec_semantic": vs,
+            }
+            for c, vt, vs in zip(cards, vec_t, vec_s)
+        ]
 
     def save(self, cards: list[PatternCard]) -> None:
         if not cards:
             return
-        self._collection.upsert(
-            ids=[c.id for c in cards],
-            documents=[self._embed_text(c) for c in cards],
-            metadatas=[{"json": json.dumps(c.to_dict(), ensure_ascii=False)} for c in cards],
-        )
+        data = self._cards_to_data(cards)
+        if self._table is None:
+            self._table = self._db.create_table(
+                self.TABLE_NAME, data, schema=self._make_schema(),
+            )
+        else:
+            self._table.merge_insert("id") \
+                .when_matched_update_all() \
+                .when_not_matched_insert_all() \
+                .execute(data)
 
     def update(self, cards: list[PatternCard]) -> None:
         self.save(cards)
 
     def get(self, pattern_id: str) -> PatternCard | None:
+        if self._table is None:
+            return None
         try:
-            result = self._collection.get(ids=[pattern_id], include=["metadatas"])
+            rows = self._table.search() \
+                .where(f"id = '{pattern_id}'") \
+                .limit(1) \
+                .to_list()
+            if not rows:
+                return None
+            return PatternCard.from_dict(json.loads(rows[0]["json"]))
         except Exception:
             return None
-        if not result["ids"]:
-            return None
-        raw = json.loads(result["metadatas"][0]["json"])
-        return PatternCard.from_dict(raw)
 
     def list_all(self) -> list[PatternCard]:
-        result = self._collection.get(include=["metadatas"])
-        if not result["ids"]:
+        if self._table is None:
             return []
+        rows = self._table.to_pandas()
         return [
-            PatternCard.from_dict(json.loads(m["json"]))
-            for m in result["metadatas"]
+            PatternCard.from_dict(json.loads(row["json"]))
+            for _, row in rows.iterrows()
         ]
 
-    def query(self, query_text: str, top_k: int = 16) -> list[tuple[PatternCard, float]]:
-        count = self._collection.count()
-        if count == 0:
-            return []
-        n = min(top_k, count)
-        result = self._collection.query(
-            query_texts=[query_text],
-            n_results=n,
-            include=["metadatas", "distances"],
-        )
-        cards = []
-        for meta, dist in zip(result["metadatas"][0], result["distances"][0]):
-            card = PatternCard.from_dict(json.loads(meta["json"]))
-            similarity = 1.0 - dist
-            cards.append((card, similarity))
-        return cards
+    def count(self) -> int:
+        if self._table is None:
+            return 0
+        return self._table.count_rows()
 
-    @staticmethod
-    def _embed_text(card: PatternCard) -> str:
-        examples_text = " / ".join(card.examples)
-        return f"{card.description} 例句：{examples_text}"
+    def query_by_template(
+        self, text: str, top_k: int = 3,
+    ) -> list[tuple[PatternCard, float]]:
+        """按 template 向量列检索，返回 (card, similarity) 列表。"""
+        if self._table is None or self._table.count_rows() == 0:
+            return []
+        vec = self._embedder.embed([text])[0]
+        n = min(top_k, self._table.count_rows())
+        results = self._table.search(vec, vector_column_name="vec_template") \
+            .metric("cosine") \
+            .limit(n) \
+            .to_list()
+        return [
+            (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
+            for r in results
+        ]
+
+    def query_by_semantic(
+        self, text: str, top_k: int = 8,
+    ) -> list[tuple[PatternCard, float]]:
+        """按 semantic 向量列检索（description + examples），返回 (card, similarity) 列表。"""
+        if self._table is None or self._table.count_rows() == 0:
+            return []
+        vec = self._embedder.embed([text])[0]
+        n = min(top_k, self._table.count_rows())
+        results = self._table.search(vec, vector_column_name="vec_semantic") \
+            .metric("cosine") \
+            .limit(n) \
+            .to_list()
+        return [
+            (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
+            for r in results
+        ]

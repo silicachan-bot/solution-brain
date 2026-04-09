@@ -6,14 +6,15 @@ from brain.compose.menu import build_menu
 from brain.compose.tools import get_tool_definition, handle_inspect_pattern
 from brain.compose.assembler import assemble_system_prompt
 
+from helpers import MockEmbedder
 
-def _make_card(id: str, title: str, template: str) -> PatternCard:
+
+def _make_card(id: str, template: str, description: str = "test desc") -> PatternCard:
     return PatternCard(
         id=id,
-        title=title,
-        description=f"desc for {title}",
+        description=description,
         template=template,
-        examples=[f"example of {title}"],
+        examples=[f"example of {template}"],
         frequency=FrequencyProfile(recent=5, medium=10, long_term=30, total=45),
         source="test",
         created_at=datetime(2026, 1, 1),
@@ -24,12 +25,11 @@ def _make_card(id: str, title: str, template: str) -> PatternCard:
 class TestBuildMenu:
     def test_formats_pattern_list(self):
         cards = [
-            _make_card("pat-001", "好家伙式吐槽", "[A]...好家伙..."),
-            _make_card("pat-002", "叠字撒娇", "[A]嘛~[B]啦~"),
+            _make_card("pat-001", "[A]...好家伙..."),
+            _make_card("pat-002", "[A]嘛~[B]啦~"),
         ]
         menu = build_menu(cards)
         assert "[pat-001]" in menu
-        assert "好家伙式吐槽" in menu
         assert "[A]...好家伙..." in menu
         assert "[pat-002]" in menu
 
@@ -48,16 +48,15 @@ class TestToolDefinition:
 
 class TestHandleInspectPattern:
     def test_returns_pattern_details(self, tmp_path):
-        db = PatternDB(tmp_path / "chroma")
-        card = _make_card("pat-001", "好家伙式吐槽", "[A]...好家伙...")
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        card = _make_card("pat-001", "[A]...好家伙...")
         db.save([card])
         result = handle_inspect_pattern(db, "pat-001")
-        assert "好家伙式吐槽" in result
         assert "[A]...好家伙..." in result
-        assert "desc for" in result
+        assert "desc" in result
 
     def test_pattern_not_found(self, tmp_path):
-        db = PatternDB(tmp_path / "chroma")
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
         result = handle_inspect_pattern(db, "nonexistent")
         assert "找不到" in result or "not found" in result.lower()
 
@@ -65,12 +64,12 @@ class TestHandleInspectPattern:
 class TestAssembler:
     def test_assembles_with_patterns(self):
         cards = [
-            _make_card("pat-001", "好家伙式吐槽", "[A]...好家伙..."),
-            _make_card("pat-002", "叠字撒娇", "[A]嘛~[B]啦~"),
+            _make_card("pat-001", "[A]...好家伙..."),
+            _make_card("pat-002", "[A]嘛~[B]啦~"),
         ]
         prompt = assemble_system_prompt(cards)
-        assert "好家伙式吐槽" in prompt
-        assert "叠字撒娇" in prompt
+        assert "[A]...好家伙..." in prompt
+        assert "[A]嘛~[B]啦~" in prompt
         assert "inspect_pattern" in prompt or "查看" in prompt
 
     def test_assembles_without_patterns(self):

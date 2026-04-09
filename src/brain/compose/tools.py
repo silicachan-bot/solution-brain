@@ -30,8 +30,7 @@ def handle_inspect_pattern(db: PatternDB, pattern_id: str) -> str:
 
     examples_text = "\n".join(f"  - {ex}" for ex in card.examples)
     return (
-        f"【{card.title}】\n"
-        f"描述：{card.description}\n"
         f"模板：{card.template}\n"
+        f"描述：{card.description}\n"
         f"例句：\n{examples_text}"
     )

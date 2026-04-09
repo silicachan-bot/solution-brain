@@ -6,7 +6,6 @@ from brain.viewer import filter_patterns, format_pattern_summary, sort_patterns
 
 def _make_card(
     id: str,
-    title: str,
     *,
     description: str,
     template: str,
@@ -18,7 +17,6 @@ def _make_card(
 ) -> PatternCard:
     return PatternCard(
         id=id,
-        title=title,
         description=description,
         template=template,
         examples=examples,
@@ -35,11 +33,10 @@ def _make_card(
 
 
 class TestFilterPatterns:
-    def test_filter_patterns_matches_title(self):
+    def test_filter_patterns_matches_template(self):
         cards = [
             _make_card(
                 "1",
-                "好家伙式吐槽",
                 description="对离谱情况吐槽",
                 template="[A]...好家伙...",
                 examples=["这也行...好家伙..."],
@@ -50,7 +47,6 @@ class TestFilterPatterns:
             ),
             _make_card(
                 "2",
-                "反问句",
                 description="用反问表达不满",
                 template="这也叫[A]？",
                 examples=["这也叫解释？"],
@@ -69,7 +65,6 @@ class TestFilterPatterns:
         cards = [
             _make_card(
                 "1",
-                "吐槽",
                 description="对离谱情况吐槽",
                 template="[A]...好家伙...",
                 examples=["这也行...好家伙..."],
@@ -80,7 +75,6 @@ class TestFilterPatterns:
             ),
             _make_card(
                 "2",
-                "撒娇",
                 description="用叠字表达亲近",
                 template="[A]啦~",
                 examples=["拜托拜托啦~"],
@@ -101,7 +95,6 @@ class TestFilterPatterns:
         cards = [
             _make_card(
                 "1",
-                "吐槽",
                 description="对离谱情况吐槽",
                 template="[A]...好家伙...",
                 examples=["这也行...好家伙..."],
@@ -122,7 +115,6 @@ class TestSortPatterns:
         cards = [
             _make_card(
                 "1",
-                "A",
                 description="a",
                 template="[A]",
                 examples=["a"],
@@ -133,7 +125,6 @@ class TestSortPatterns:
             ),
             _make_card(
                 "2",
-                "B",
                 description="b",
                 template="[B]",
                 examples=["b"],
@@ -152,7 +143,6 @@ class TestSortPatterns:
         cards = [
             _make_card(
                 "1",
-                "A",
                 description="a",
                 template="[A]",
                 examples=["a"],
@@ -163,7 +153,6 @@ class TestSortPatterns:
             ),
             _make_card(
                 "2",
-                "B",
                 description="b",
                 template="[B]",
                 examples=["b"],
@@ -178,13 +167,12 @@ class TestSortPatterns:
 
         assert [card.id for card in result] == ["2", "1"]
 
-    def test_sort_patterns_by_title_asc(self):
+    def test_sort_patterns_by_template_asc(self):
         cards = [
             _make_card(
                 "1",
-                "吐槽",
                 description="a",
-                template="[A]",
+                template="[A]吐槽",
                 examples=["a"],
                 updated_day=1,
                 recent=1,
@@ -193,9 +181,8 @@ class TestSortPatterns:
             ),
             _make_card(
                 "2",
-                "反问",
                 description="b",
-                template="[B]",
+                template="[A]反问",
                 examples=["b"],
                 updated_day=1,
                 recent=8,
@@ -204,16 +191,15 @@ class TestSortPatterns:
             ),
         ]
 
-        result = sort_patterns(cards, "title")
+        result = sort_patterns(cards, "template")
 
-        assert [card.title for card in result] == ["反问", "吐槽"]
+        assert [card.template for card in result] == ["[A]反问", "[A]吐槽"]
 
 
 class TestFormatPatternSummary:
     def test_format_pattern_summary_contains_key_fields(self):
         card = _make_card(
             "1",
-            "好家伙式吐槽",
             description="对离谱情况吐槽",
             template="[A]...好家伙...",
             examples=["这也行...好家伙..."],
@@ -225,7 +211,6 @@ class TestFormatPatternSummary:
 
         summary = format_pattern_summary(card)
 
-        assert "好家伙式吐槽" in summary
         assert "[A]...好家伙..." in summary
         assert "freshness=" in summary
         assert "total=10" in summary
