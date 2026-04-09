@@ -18,8 +18,10 @@ class PatternDB:
         self._db = lancedb.connect(str(self.persist_dir))
         self._embedder = embedder
         self._table = None
-        if self.TABLE_NAME in self._db.list_tables():
+        try:
             self._table = self._db.open_table(self.TABLE_NAME)
+        except Exception:
+            self._table = None
 
     def _make_schema(self) -> pa.Schema:
         return pa.schema([
