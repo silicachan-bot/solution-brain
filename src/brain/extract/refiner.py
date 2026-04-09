@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime
@@ -257,8 +258,11 @@ def _dedup_intra_batch(
         kept: dict[str, PatternCard] = {}
 
         for card in cards:
+            t0 = time.perf_counter()
             vec_t = embedder.embed([card.template])[0]
             vec_s = embedder.embed([card.embed_text()])[0]
+            t_embed = time.perf_counter() - t0
+
             row = {
                 "id": card.id,
                 "json": json.dumps(card.to_dict(), ensure_ascii=False),
@@ -269,6 +273,10 @@ def _dedup_intra_batch(
             if tmp_table is None:
                 tmp_table = tmp_db.create_table("batch", [row], schema=schema)
                 kept[card.id] = card
+                _console.print(
+                    f"批次内  [cyan]{card.template!r}[/cyan]"
+                    f"  [dim]embed {t_embed*1000:.0f}ms[/dim]  [dim]首条，直接入库[/dim]"
+                )
                 continue
 
             n = min(top_n, tmp_table.count_rows())
@@ -288,12 +296,18 @@ def _dedup_intra_batch(
 
             tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl)
             sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem)
-            _console.print(f"批次内  [cyan]{card.template!r}[/cyan]")
+            _console.print(
+                f"批次内  [cyan]{card.template!r}[/cyan]"
+                f"  [dim]embed {t_embed*1000:.0f}ms[/dim]"
+            )
             _console.print(f"  vec_template: {tmpl_str}")
             _console.print(f"  vec_semantic: {sem_str}")
             _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
 
+            t1 = time.perf_counter()
             dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+            t_llm = time.perf_counter() - t1
+
             if dup_idx is not None:
                 matched = merged[dup_idx]
                 target = kept[matched.id]
@@ -312,13 +326,15 @@ def _dedup_intra_batch(
                         "vec_semantic": new_vec_s,
                     }])
                 _console.print(
-                    f"  [green]→ LLM: 与 {matched.template!r} 重复"
+                    f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} 重复"
                     f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
                     f" · 合并[/green]"
                 )
+                _console.print()
                 continue
 
-            _console.print(f"  [dim]→ LLM: 无重复，保留[/dim]")
+            _console.print(f"  [dim]→ LLM ({t_llm:.1f}s): 无重复，保留[/dim]")
+            _console.print()
             tmp_table.add([row])
             kept[card.id] = card
 
@@ -338,10 +354,20 @@ def _dedup_against_db(
     updates_by_id: dict[str, PatternCard] = {}
 
     for card in cards:
+        t0 = time.perf_counter()
         hits_tmpl = db.query_by_template(card.template, top_k=top_n)
+        t_tmpl = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
         hits_sem = db.query_by_semantic(card.embed_text(), top_k=top_n)
+        t_sem = time.perf_counter() - t1
 
         if not hits_tmpl and not hits_sem:
+            _console.print(
+                f"入库去重  [cyan]{card.template!r}[/cyan]"
+                f"  [dim]embed+检索 {(t_tmpl+t_sem)*1000:.0f}ms[/dim]  [dim]无候选，直接新增[/dim]"
+            )
+            _console.print()
             new_cards.append(card)
             continue
 
@@ -349,12 +375,18 @@ def _dedup_against_db(
 
         tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl) or "(空)"
         sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem) or "(空)"
-        _console.print(f"入库去重  [cyan]{card.template!r}[/cyan]")
+        _console.print(
+            f"入库去重  [cyan]{card.template!r}[/cyan]"
+            f"  [dim]embed+检索 tmpl={t_tmpl*1000:.0f}ms sem={t_sem*1000:.0f}ms[/dim]"
+        )
         _console.print(f"  vec_template: {tmpl_str}")
         _console.print(f"  vec_semantic: {sem_str}")
         _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
 
+        t2 = time.perf_counter()
         dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+        t_llm = time.perf_counter() - t2
+
         if dup_idx is not None:
             matched = merged[dup_idx]
             target = updates_by_id.get(matched.id, matched)
@@ -363,13 +395,15 @@ def _dedup_against_db(
             _merge_into(target, card)
             updates_by_id[target.id] = target
             _console.print(
-                f"  [green]→ LLM: 与 {matched.template!r} ({matched.id}) 重复"
+                f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} ({matched.id}) 重复"
                 f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
                 f" · 更新已有[/green]"
             )
+            _console.print()
             continue
 
-        _console.print(f"  [dim]→ LLM: 无重复，新增[/dim]")
+        _console.print(f"  [dim]→ LLM ({t_llm:.1f}s): 无重复，新增[/dim]")
+        _console.print()
         new_cards.append(card)
 
     return new_cards, list(updates_by_id.values())
