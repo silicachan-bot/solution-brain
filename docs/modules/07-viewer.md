@@ -36,17 +36,16 @@
 
 ### 3.1 `get_db()`
 
-使用 `@st.cache_resource` 包装，返回 `PatternDB(CHROMA_DIR)`。
+使用 `@st.cache_resource` 包装，返回 `PatternDB(LANCEDB_DIR)`。
 
 这意味着：
 - 查看器会复用同一个数据库连接对象
-- 默认读取本地 `data/chromadb`
+- 默认读取本地 `data/lancedb`
 
 ### 3.2 `render_pattern_card(card)`
 
 负责把单个 `PatternCard` 展开成可读界面，展示内容包括：
 - ID
-- 标题
 - 模板
 - 描述
 - 来源
@@ -59,7 +58,7 @@
 定义在 [src/brain/viewer.py:8-25](../../src/brain/viewer.py#L8-L25)。
 
 行为：
-- 把 `title`、`template`、`description`、`examples` 拼成一个搜索串
+- 把 `template`、`description`、`examples` 拼成一个搜索串
 - 全部转小写后做子串匹配
 - 返回过滤后的列表
 
@@ -72,7 +71,7 @@
 支持三种排序键：
 - `updated_at`
 - `freshness`
-- `title`
+- `template`
 
 非法排序键会回退到 `updated_at`。
 
@@ -83,7 +82,7 @@
 生成 expander 标题，格式类似：
 
 ```text
-标题 | 模板 | freshness=0.xx | total=xx
+"模板" | freshness=0.xx | total=xx
 ```
 
 ## 4. 输入与输出

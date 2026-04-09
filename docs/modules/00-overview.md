@@ -8,7 +8,7 @@
 
 1. `shared`：公共数据模型与配置
 2. `ingest`：从 Bilibili SQLite 读取评论、清洗、维护水位线
-3. `extract`：评论分块、调用 LLM 提取模式、按标题去重合并
+3. `extract`：评论分块、调用 LLM 提取模式、基于向量检索与 LLM 判断的两阶段去重合并
 4. `store`：PatternCard 持久化、embedding、检索排序
 5. `compose`：菜单构造、system prompt 组装、`inspect_pattern` 工具
 6. `pipeline`：把 ingest → extract → store 串起来的命令行入口
@@ -67,12 +67,11 @@ viewer 或外部调用方消费
 
 ### 4.2 `PatternCard`
 
-定义于 [src/brain/models.py:22-70](src/brain/models.py#L22-L70)。
+定义于 [src/brain/models.py:23-73](src/brain/models.py#L23-L73)。
 
 表示提取出的语言模式卡片，包含：
 
 - `id`
-- `title`
 - `description`
 - `template`
 - `examples`
@@ -80,6 +79,8 @@ viewer 或外部调用方消费
 - `source`
 - `created_at`
 - `updated_at`
+
+并提供 `embed_text()` 方法，返回用于向量检索的文本（`description` + 例句拼接），见 [src/brain/models.py:70-73](src/brain/models.py#L70-L73)。
 
 ### 4.3 `FrequencyProfile`
 
@@ -101,8 +102,8 @@ viewer 或外部调用方消费
 6. 清洗评论
 7. 按块切分评论
 8. 对每块调用 LLM 提取模式
-9. 将提取结果与已有模式库做去重合并
-10. 写入 ChromaDB
+9. 将提取结果与已有模式库做基于 LanceDB 双路向量检索 + LLM 判断的两阶段去重合并
+10. 写入 LanceDB
 11. 更新水位线
 
 ### 5.2 查看器流程
@@ -121,7 +122,7 @@ viewer 或外部调用方消费
 
 - `extract.chunker` 现在只做分块，不做额外清洗，见 [src/brain/extract/chunker.py:5-15](src/brain/extract/chunker.py#L5-L15)
 - 评论级去重在 `ingest.cleaner.clean_comments`，不是在 `extract.chunker`
-- `extract.refiner.deduplicate_and_merge` 目前只按 `title.strip().lower()` 做去重，不做 embedding 相似度去重，见 [src/brain/extract/refiner.py:83-129](src/brain/extract/refiner.py#L83-L129)
+- `extract.refiner.deduplicate_and_merge` 当前使用 LanceDB 双路检索（vec_template + vec_semantic）+ LLM Top-N 判断做两阶段去重，不再按 title 精确匹配；签名为 `(cards, db, embedder, top_n)`
 - `viewer` 的实现不在 `src/brain/compose/`，而是在单独脚本 `scripts/streamlit_patterns.py`
 - 仓库中没有独立的 `api` 模块
 

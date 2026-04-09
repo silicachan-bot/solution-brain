@@ -41,10 +41,9 @@
 
 ### 3.2 `_EXTRACT_PROMPT`
 
-定义在 [src/brain/extract/refiner.py:11-29](../../src/brain/extract/refiner.py#L11-L29)。
+定义在 [src/brain/extract/refiner.py:34-51](../../src/brain/extract/refiner.py#L34-L51)。
 
 这是当前用于模式提取的固定提示词，要求模型输出 JSON 数组，每个元素包含：
-- `title`
 - `template`
 - `examples`
 - `description`
@@ -85,33 +84,77 @@
 - `examples`：最多保留前 5 条
 - `frequency`：初始四个窗口都设为 1
 - `source`：固定写成 `bilibili`
+- 校验必要字段为 `template`、`examples`、`description`，缺任何一个则丢弃该条目
 
 如果返回不是合法 JSON 或不是数组，返回 `([], total_tokens)`。
 
 ### 3.5 `deduplicate_and_merge()`
 
-定义在 [src/brain/extract/refiner.py:83-115](../../src/brain/extract/refiner.py#L83-L115)。
+定义在 [src/brain/extract/refiner.py:378-399](../../src/brain/extract/refiner.py#L378-L399)。
 
-当前去重逻辑是 MVP 版本：**按标题归一化后精确匹配**。
+签名：`deduplicate_and_merge(cards, db, embedder, top_n=DEDUP_TOP_N)`
 
-归一化方式：
+这是两阶段去重的统一入口：
 
-```text
-card.title.strip().lower()
-```
-
-它做两轮合并：
-
-1. 新卡片之间合并
-2. 新卡片与已有模式库合并
+1. 先调用 `_dedup_intra_batch(cards, embedder, top_n)` 完成批次内去重
+2. 再调用 `_dedup_against_db(deduped, db, top_n)` 完成入库前去重
 
 返回值：
-- `new_cards`
-- `updated_existing_cards`
+- `new_cards`：需要新增到数据库的卡片
+- `updated_existing_cards`：需要更新已有记录的卡片
 
-### 3.6 `_merge_into()`
+### 3.6 `_judge_duplicate_topn(card, candidates)`
 
-定义在 [src/brain/extract/refiner.py:118-129](../../src/brain/extract/refiner.py#L118-L129)。
+定义在 [src/brain/extract/refiner.py:117-159](../../src/brain/extract/refiner.py#L117-L159)。
+
+把当前模式和 top-N 候选一次性交给 LLM，判断候选中是否有与当前模式语义等价或高度相似的条目。
+
+返回 `(candidate_index_0based | None, 'current' | 'candidate')`：
+- 第一项为 `None` 表示无重复；为整数时表示 `candidates` 列表中匹配的 0-based 下标
+- 第二项表示哪一方的描述更完整，仅在有重复时有意义
+
+解析失败或候选为空时安全返回 `(None, 'current')`。
+
+### 3.7 `_dedup_intra_batch(cards, embedder, top_n)`
+
+定义在 [src/brain/extract/refiner.py:240-325](../../src/brain/extract/refiner.py#L240-L325)。
+
+批次内去重，核心逻辑：
+
+1. 用 `tempfile.TemporaryDirectory` 创建临时 LanceDB 表，schema 含 `id`、`json`、`vec_template`、`vec_semantic` 四列
+2. 第一张卡片直接插入，不做检索
+3. 后续每张卡片先对 `vec_template` 和 `vec_semantic` 各取 top_n 候选
+4. 调用 `_merge_hits` 合并去重后交 `_judge_duplicate_topn` 判断
+5. 判断重复则合并到已有卡片，更新临时表；不重复则插入临时表并保留
+
+终端使用 `rich.Console` 并列输出两路检索结果和 LLM 判断结果。
+
+返回批次内去重后的 `list[PatternCard]`。
+
+### 3.8 `_dedup_against_db(cards, db, top_n)`
+
+定义在 [src/brain/extract/refiner.py:328-375](../../src/brain/extract/refiner.py#L328-L375)。
+
+入库前去重，核心逻辑：
+
+1. 每张新卡片对持久库分别调用 `db.query_by_template(card.template, top_k=top_n)` 和 `db.query_by_semantic(card.embed_text(), top_k=top_n)`
+2. 调用 `_merge_hits` 合并后交 `_judge_duplicate_topn` 判断
+3. 若判断重复，累计到 `updates_by_id` 字典；多张新卡片匹配同一已有卡片时，频率合并到同一对象上
+4. 不重复则加入 `new_cards`
+
+终端并列输出两路检索结果和 LLM 判断结果。
+
+返回 `(new_cards, list(updates_by_id.values()))`。
+
+### 3.9 `_merge_hits(hits_a, hits_b)`
+
+定义在 [src/brain/extract/refiner.py:228-237](../../src/brain/extract/refiner.py#L228-L237)。
+
+合并两路检索结果（均为 `list[tuple[PatternCard, float]]`），按 `card.id` 去重后返回 `list[PatternCard]`。
+
+### 3.10 `_merge_into()`
+
+定义在 [src/brain/extract/refiner.py:402-413](../../src/brain/extract/refiner.py#L402-L413)。
 
 合并规则：
 - `frequency` 四个字段逐项累加
@@ -141,8 +184,10 @@ card.title.strip().lower()
 ### 4.3 合并阶段
 
 输入：
-- 新提取的 `list[PatternCard]`
-- 已存在的 `list[PatternCard]`
+- 新提取的 `list[PatternCard]`（`cards`）
+- 持久库对象 `db`（`PatternDB`）
+- embedding 对象 `embedder`（`QwenEmbedder`）
+- 可选 `top_n: int`
 
 输出：
 - `(new_cards, updates)`
@@ -156,7 +201,7 @@ cleaned comments
   -> chunk_comments(...)
   -> for each chunk: extract_from_chunk(...)
   -> all_patterns
-  -> deduplicate_and_merge(all_patterns, existing_patterns)
+  -> deduplicate_and_merge(all_patterns, db, embedder)
 ```
 
 展开后是：
@@ -166,16 +211,19 @@ cleaned comments
 2. 每块独立请求一次 LLM
 3. 每块返回若干 PatternCard
 4. 汇总所有块的 PatternCard
-5. 按标题做去重和频率合并
-6. 区分出 new_cards 和 updates
+5. 阶段一：_dedup_intra_batch —— 批次内双路向量检索 + LLM 判重，合并同批次重复模式
+6. 阶段二：_dedup_against_db —— 与持久库双路向量检索 + LLM 判重，区分新增与更新
+7. 返回 new_cards 和 updates
 ```
 
 ## 6. 依赖关系
 
 依赖：
 - [src/brain/models.py](../../src/brain/models.py) 中的 `CleanedComment`、`PatternCard`、`FrequencyProfile`
-- [src/brain/config.py](../../src/brain/config.py) 中的 LLM 配置
+- [src/brain/config.py](../../src/brain/config.py) 中的 LLM 配置、`DEDUP_TOP_N`、`EMBED_DIMENSIONS`
 - OpenAI 兼容 SDK
+- `lancedb`、`pyarrow`（批次内临时表）
+- `rich.console.Console`（终端日志）
 
 被这些模块使用：
 - [scripts/run_pipeline.py](../../scripts/run_pipeline.py)
@@ -186,8 +234,8 @@ cleaned comments
 1. `chunk_comments()` 当前**不做**设计文档里提过的基础清洗去重。
    - 评论清洗实际发生在 `ingest.cleaner`，而不是 `extract.chunker`。
 
-2. 模式去重目前只按标题精确匹配。
-   - 例如标题不同但语义相近的模式，不会合并。
+2. 模式去重使用双路向量检索 + LLM 判重，每张卡片都会产生 LLM 调用开销。
+   - 批次较大时，去重阶段的 API 成本不可忽视。
 
 3. `extract_from_chunk()` 对异常 JSON 的处理很保守。
    - 当前解析失败就返回空列表，不保留原始错误上下文。
@@ -195,5 +243,8 @@ cleaned comments
 4. `source` 当前固定写死为 `bilibili`。
    - 这意味着 `PatternCard` 还没有携带更细粒度的数据来源信息。
 
-5. 当前没有“跨块二次验证”或“模式质量评分”。
-   - LLM 提什么就收什么，后续只做标题级 merge。
+5. 当前没有”跨块二次验证”或”模式质量评分”。
+   - LLM 提什么就收什么，入库前只做向量 + LLM 去重，不评估质量。
+
+6. `_dedup_intra_batch` 使用 `tempfile.TemporaryDirectory`，临时 LanceDB 表在函数返回后立即删除。
+   - 批次内去重无法持久化中间状态，失败时需重跑整批。

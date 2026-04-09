@@ -24,10 +24,10 @@
 
 ### 2.2 配置
 
-- [src/brain/config.py:7-14](src/brain/config.py#L7-L14) 路径与数据目录
-- [src/brain/config.py:15-20](src/brain/config.py#L15-L20) Bilibili 数据库路径
-- [src/brain/config.py:22-31](src/brain/config.py#L22-L31) LLM 与 embedding 配置
-- [src/brain/config.py:33-40](src/brain/config.py#L33-L40) 提取与检索参数
+- [src/brain/config.py:8-14](src/brain/config.py#L8-L14) 路径与数据目录
+- [src/brain/config.py:16-21](src/brain/config.py#L16-L21) Bilibili 数据库路径
+- [src/brain/config.py:23-32](src/brain/config.py#L23-L32) LLM 与 embedding 配置
+- [src/brain/config.py:34-43](src/brain/config.py#L34-L43) 提取、检索与去重参数
 
 ## 3. 核心对象
 
@@ -48,12 +48,22 @@
 
 ### 3.2 `PatternCard`
 
-`PatternCard` 是整个项目的核心结构，字段见 [src/brain/models.py:22-33](src/brain/models.py#L22-L33)。
+`PatternCard` 是整个项目的核心结构，字段见 [src/brain/models.py:24-32](src/brain/models.py#L24-L32)：
+
+- `id`
+- `description`
+- `template`
+- `examples`
+- `frequency`
+- `source`
+- `created_at`
+- `updated_at`
 
 它还提供：
 
-- `to_dict()`：序列化为 JSON 友好的字典，见 [src/brain/models.py:34-50](src/brain/models.py#L34-L50)
-- `from_dict()`：从存储字典恢复对象，见 [src/brain/models.py:52-70](src/brain/models.py#L52-L70)
+- `to_dict()`：序列化为 JSON 友好的字典，见 [src/brain/models.py:34-49](src/brain/models.py#L34-L49)
+- `from_dict()`：从存储字典恢复对象，见 [src/brain/models.py:51-68](src/brain/models.py#L51-L68)
+- `embed_text()`：返回用于向量检索的文本（`description` + 例句拼接），见 [src/brain/models.py:70-73](src/brain/models.py#L70-L73)
 
 该对象在以下位置被直接使用：
 
@@ -86,7 +96,7 @@
 - `SOLUTION_BRAIN_DIR`
 - `DATA_DIR`
 - `STATE_FILE`
-- `CHROMA_DIR`
+- `LANCEDB_DIR`
 - `BILIBILI_DB_PATH`
 - `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL`
 - `EMBED_API_BASE` / `EMBED_API_KEY` / `EMBED_MODEL` / `EMBED_DIMENSIONS`
@@ -95,6 +105,7 @@
 - `RETRIEVAL_TOP_K`
 - `SIMILARITY_WEIGHT`
 - `FRESHNESS_WEIGHT`
+- `DEDUP_TOP_N`
 
 ## 5. 执行流程
 
@@ -124,7 +135,7 @@ PatternCard
     ↓
 PatternCard.to_dict()
     ↓
-JSON metadata in ChromaDB
+JSON metadata in LanceDB
     ↓
 PatternCard.from_dict()
     ↓
@@ -156,7 +167,7 @@ compose / viewer / retriever 消费
 - `store.embedding`：embedding 配置
 - `store.retriever`：检索排序权重
 - `scripts/run_pipeline.py`：路径与默认参数
-- `scripts/streamlit_patterns.py`：Chroma 路径与默认 top_k
+- `scripts/streamlit_patterns.py`：LanceDB 路径与默认 top_k
 
 ## 7. 当前限制 / 已知偏差
 

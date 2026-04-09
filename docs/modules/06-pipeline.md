@@ -39,7 +39,7 @@
 - `BilibiliReader`
 - `WatermarkState`
 - `PatternDB`
-- `QwenEmbeddingFunction`
+- `QwenEmbedder`
 
 以及函数：
 - `clean_comments()`
@@ -70,18 +70,18 @@
 - Bilibili SQLite 数据库
 - `.env` 中的 API / 路径配置
 - 本地 `state.json`
-- 本地 ChromaDB 目录
+- 本地 LanceDB 目录（`LANCEDB_DIR`）
 
 ### 4.2 输出
 
-- 新增或更新后的 Chroma collection
+- 新增或更新后的 LanceDB 表
 - 更新后的 `state.json`
 - Rich Live 实时终端界面（双进度条 + 统计行 + 已完成视频表格）
 - `data/llm_responses.log`：每次 LLM 调用的完整 prompt 与回复
 
 在 `--dry-run` 模式下：
 - 不调用 LLM
-- 不写入 ChromaDB
+- 不写入 LanceDB
 - 不更新水位线
 - 使用纯文本输出，不启动 Rich Live
 
@@ -91,7 +91,7 @@
 
 ```text
 1. 解析 CLI 参数
-2. 初始化 reader / state / db
+2. 初始化 reader / state / embedder / db（PatternDB(LANCEDB_DIR, embedder=embedder)）
 3. 读取视频列表
 4. 如果不是 --full，则按 watermark 过滤视频
 5. 如果设置了 --limit，则截断视频列表
@@ -101,11 +101,11 @@
    6.3 分块
    6.4 若不是 dry-run，则逐块调 LLM 提取
 7. 汇总所有 PatternCard
-8. 读取已有模式库
-9. 去重合并
+8. 打印原始模式数量与 db.count() 已有数量
+9. 调用 deduplicate_and_merge(all_patterns, db, embedder)，两阶段去重（有 Rich 日志输出）
 10. 保存 new_cards，更新 updates
 11. 把最后一个 bvid 写入 watermark
-12. 打印完成信息
+12. 打印完成信息与 db.count() 最终总数
 ```
 
 其中 dry-run 分支在 [scripts/run_pipeline.py:76-88](../../scripts/run_pipeline.py#L76-L88)。
@@ -113,14 +113,14 @@
 ## 6. 依赖关系
 
 直接依赖：
-- `brain.config`
+- `brain.config`（含 `LANCEDB_DIR`）
 - `brain.ingest.reader`
 - `brain.ingest.cleaner`
 - `brain.ingest.state`
 - `brain.extract.chunker`
 - `brain.extract.refiner`
 - `brain.store.pattern_db`
-- `brain.store.embedding`
+- `brain.store.embedding`（`QwenEmbedder`）
 
 对运行环境的隐含依赖：
 - 能访问 Bilibili SQLite 文件
