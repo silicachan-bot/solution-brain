@@ -21,3 +21,9 @@ See @README.md for project overview and available scripts.
 uv run pytest tests/
 uv run pytest tests/test_ingest.py  # 单文件
 ```
+
+## 迭代工作流
+
+- 在迭代 worktree 中，每完成一轮“可运行、已验证”的完整修改后，必须立即提交一次 git commit。
+- commit message 需要详细说明本轮改动点、验证方式、以及与上一轮相比重点调整了什么。
+- 不要把一次完整版本长时间停留在未提交状态；默认每轮迭代都应有可回退的提交记录。
