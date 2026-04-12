@@ -5,8 +5,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+
+def _resolve_main_repo_dir(worktree_dir: Path) -> Path:
+    """在 .claude/worktrees/* 下运行时，回退到主仓库根目录。"""
+    if worktree_dir.parent.name == "worktrees" and worktree_dir.parent.parent.name == ".claude":
+        return worktree_dir.parent.parent.parent
+    return worktree_dir
+
+
 # Paths
 SOLUTION_BRAIN_DIR = Path(__file__).resolve().parent.parent.parent
+MAIN_REPO_DIR = _resolve_main_repo_dir(SOLUTION_BRAIN_DIR)
 load_dotenv(SOLUTION_BRAIN_DIR / ".env")
 
 DATA_DIR = SOLUTION_BRAIN_DIR / "data"
@@ -16,7 +25,7 @@ LANCEDB_DIR = DATA_DIR / "lancedb"
 BILIBILI_DB_PATH = Path(
     os.environ.get(
         "BILIBILI_DB_PATH",
-        str(SOLUTION_BRAIN_DIR.parent / "raw-data-pipeline" / "bilibili" / "_storage" / "database" / "bilibili.db"),
+        str(MAIN_REPO_DIR.parent / "raw-data-pipeline" / "bilibili" / "_storage" / "database" / "bilibili.db"),
     )
 )
 
