@@ -12,6 +12,9 @@ dependencies = [
     "streamlit>=1.44.0",
 ]
 
+[project.scripts]
+brain-patterns = "brain.streamlit_launcher:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
