@@ -5,6 +5,8 @@
 对应代码：
 - [src/brain/extract/chunker.py](../../src/brain/extract/chunker.py)
 - [src/brain/extract/refiner.py](../../src/brain/extract/refiner.py)
+- [src/brain/prompts/extract_patterns.txt](../../src/brain/prompts/extract_patterns.txt)
+- [src/brain/prompts/extract_dedup_judge.txt](../../src/brain/prompts/extract_dedup_judge.txt)
 
 ## 1. 模块职责
 
@@ -25,6 +27,10 @@
 
 - 分块器：[src/brain/extract/chunker.py](../../src/brain/extract/chunker.py)
 - 提取与合并：[src/brain/extract/refiner.py](../../src/brain/extract/refiner.py)
+- [src/brain/prompts/extract_patterns.txt](../../src/brain/prompts/extract_patterns.txt)
+- [src/brain/prompts/extract_dedup_judge.txt](../../src/brain/prompts/extract_dedup_judge.txt)
+
+prompt 文件统一位于 `src/brain/prompts/`，命名规范为 `模块名_用途.txt`。
 
 ## 3. 核心对象 / 函数
 
@@ -39,14 +45,16 @@
 
 当前它只做切片，不做额外清洗或去重。
 
-### 3.2 `_EXTRACT_PROMPT`
+### 3.2 `extract_patterns.txt`
 
-定义在 [src/brain/extract/refiner.py:34-51](../../src/brain/extract/refiner.py#L34-L51)。
+位于 [src/brain/prompts/extract_patterns.txt](../../src/brain/prompts/extract_patterns.txt)。
 
-这是当前用于模式提取的固定提示词，要求模型输出 JSON 数组，每个元素包含：
+这是当前用于模式提取的提示词模板，要求模型输出 JSON 数组，每个元素包含：
 - `template`
 - `examples`
 - `description`
+
+评论正文通过 `{{ comments }}` 注入模板。
 
 ### 3.3 `_client` 与 `_call_llm_streaming()`
 
@@ -69,7 +77,7 @@
 处理过程：
 
 1. 给评论编号
-2. 拼接提示词
+2. 渲染 [src/brain/prompts/extract_patterns.txt](../../src/brain/prompts/extract_patterns.txt)
 3. 流式调用 LLM，边生成边触发 `on_token`
 4. 将完整 prompt 与模型回复写入后台日志
 5. 如有 Markdown code fence，则剥掉
@@ -107,7 +115,7 @@
 
 定义在 [src/brain/extract/refiner.py:117-159](../../src/brain/extract/refiner.py#L117-L159)。
 
-把当前模式和 top-N 候选一次性交给 LLM，判断候选中是否有与当前模式语义等价或高度相似的条目。
+把当前模式和 top-N 候选渲染进 [src/brain/prompts/extract_dedup_judge.txt](../../src/brain/prompts/extract_dedup_judge.txt)，再一次性交给 LLM，判断候选中是否有与当前模式语义等价或高度相似的条目。
 
 返回 `(candidate_index_0based | None, 'current' | 'candidate')`：
 - 第一项为 `None` 表示无重复；为整数时表示 `candidates` 列表中匹配的 0-based 下标

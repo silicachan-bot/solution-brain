@@ -5,6 +5,7 @@ from brain.store.pattern_db import PatternDB
 from brain.compose.menu import build_menu
 from brain.compose.tools import get_tool_definition, handle_inspect_pattern
 from brain.compose.assembler import assemble_system_prompt
+from brain.prompts import load_prompt
 
 from helpers import MockEmbedder
 
@@ -76,3 +77,9 @@ class TestAssembler:
         prompt = assemble_system_prompt([])
         assert isinstance(prompt, str)
         assert len(prompt) > 0
+
+
+class TestPromptLoader:
+    def test_loads_compose_prompt(self):
+        prompt = load_prompt("compose_system.txt")
+        assert "inspect_pattern" in prompt

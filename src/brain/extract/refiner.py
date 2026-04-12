@@ -17,6 +17,7 @@ from rich.console import Console
 
 from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL, DEDUP_TOP_N, EMBED_DIMENSIONS
 from brain.models import PatternCard, FrequencyProfile
+from brain.prompts import render_prompt
 
 # 模块级单例，避免每次调用重建连接池
 _client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
@@ -31,25 +32,6 @@ if not _llm_logger.handlers:
     _llm_logger.addHandler(_fh)
     _llm_logger.propagate = False
 _llm_logger.setLevel(logging.DEBUG)
-
-_EXTRACT_PROMPT = """\
-以下是 B 站某视频下的用户评论。请从中发现值得收录的语言模式——特别是：
-- 多人使用的相似句式
-- 不像 AI 会自然生成的表达
-- 可以替换内容复用的句式模板
-
-对每个发现的模式，输出 JSON 数组，每个元素包含：
-{
-  "template": "含 [A] [B] 占位符的模板句",
-  "examples": ["2-5个真实例句"],
-  "description": "模式描述：是什么、什么时候用、传达什么感觉"
-}
-
-如果这批评论中没有值得收录的模式，返回空数组 []。
-只输出 JSON，不要其他文字。
-
-评论：
-"""
 
 
 def _call_llm_streaming(
@@ -88,33 +70,6 @@ def _call_llm_streaming(
     return "".join(parts), prompt_tokens, completion_tokens
 
 
-_DEDUP_JUDGE_PROMPT = """\
-以下是一个从 B 站评论中提取的语言模式（当前模式），以及若干个从数据库中检索到的相似候选。
-请判断候选中是否有与当前模式描述同一种语言模式的条目（语义等价或高度相似，可以合并为一条记录）。
-
-【当前模式】
-模板: {current_template}
-描述: {current_desc}
-例句: {current_examples}
-
-【相似候选】
-{candidates_block}
-
-如果候选中有重复的，请选出最佳匹配（只选一个）。如果都不重复，输出 0。
-
-输出 JSON:
-{{
-  "duplicate_of": 0,
-  "keep_description": "current" 或 "candidate",
-  "reason": "一句话说明"
-}}
-
-duplicate_of: 候选编号（1 开始），0 表示无重复。
-keep_description: 哪一方的描述更完整准确，仅在有重复时有意义。
-只输出 JSON，不要其他文字。
-"""
-
-
 def _judge_duplicate_topn(
     card: PatternCard,
     candidates: list[PatternCard],
@@ -136,7 +91,8 @@ def _judge_duplicate_topn(
         )
     candidates_block = "\n".join(parts)
 
-    prompt = _DEDUP_JUDGE_PROMPT.format(
+    prompt = render_prompt(
+        "extract_dedup_judge.txt",
         current_template=card.template,
         current_desc=card.description,
         current_examples=" / ".join(card.examples[:3]),
@@ -167,7 +123,7 @@ def extract_from_chunk(
 ) -> tuple[list[PatternCard], int]:
     """返回 (patterns, total_tokens)。total_tokens=0 表示 API 未返回用量信息。"""
     numbered = "\n".join(f"{i+1}. {m}" for i, m in enumerate(messages))
-    prompt = _EXTRACT_PROMPT + numbered
+    prompt = render_prompt("extract_patterns.txt", comments=numbered)
 
     content, prompt_tokens, completion_tokens = _call_llm_streaming(prompt, on_token=on_token)
     content = content.strip()

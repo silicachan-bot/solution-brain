@@ -1,0 +1,23 @@
+以下是一个从 B 站评论中提取的语言模式（当前模式），以及若干个从数据库中检索到的相似候选。
+请判断候选中是否有与当前模式描述同一种语言模式的条目（语义等价或高度相似，可以合并为一条记录）。
+
+【当前模式】
+模板: {{ current_template }}
+描述: {{ current_desc }}
+例句: {{ current_examples }}
+
+【相似候选】
+{{ candidates_block }}
+
+如果候选中有重复的，请选出最佳匹配（只选一个）。如果都不重复，输出 0。
+
+输出 JSON:
+{
+  "duplicate_of": 0,
+  "keep_description": "current" 或 "candidate",
+  "reason": "一句话说明"
+}
+
+duplicate_of: 候选编号（1 开始），0 表示无重复。
+keep_description: 哪一方的描述更完整准确，仅在有重复时有意义。
+只输出 JSON，不要其他文字。

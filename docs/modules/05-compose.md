@@ -6,7 +6,7 @@
 - [src/brain/compose/menu.py](../../src/brain/compose/menu.py)
 - [src/brain/compose/assembler.py](../../src/brain/compose/assembler.py)
 - [src/brain/compose/tools.py](../../src/brain/compose/tools.py)
-- [src/brain/compose/templates/system.txt](../../src/brain/compose/templates/system.txt)
+- [src/brain/prompts/compose_system.txt](../../src/brain/prompts/compose_system.txt)
 
 ## 1. 模块职责
 
@@ -27,7 +27,8 @@
 - 菜单生成：[src/brain/compose/menu.py](../../src/brain/compose/menu.py)
 - prompt 组装：[src/brain/compose/assembler.py](../../src/brain/compose/assembler.py)
 - 工具定义与处理：[src/brain/compose/tools.py](../../src/brain/compose/tools.py)
-- 模板文件：[src/brain/compose/templates/system.txt](../../src/brain/compose/templates/system.txt)
+- 模板文件：[src/brain/prompts/compose_system.txt](../../src/brain/prompts/compose_system.txt)
+- prompt 加载器：`brain.prompts.loader`，命名规范为 `模块名_用途.txt`
 
 ## 3. 核心对象 / 函数
 
@@ -56,7 +57,7 @@
 
 行为：
 1. 调用 `build_menu(patterns)`
-2. 读取 [src/brain/compose/templates/system.txt](../../src/brain/compose/templates/system.txt)
+2. 读取 [src/brain/prompts/compose_system.txt](../../src/brain/prompts/compose_system.txt)
 3. 用 Jinja2 模板渲染 `menu`
 4. 返回最终 system prompt 字符串
 
@@ -65,7 +66,7 @@
 - 再决定是否使用某种语言模式
 - 也可以完全不使用任何模式
 
-模板内容见 [src/brain/compose/templates/system.txt:0-3](../../src/brain/compose/templates/system.txt#L1-L4)。
+模板内容见 [src/brain/prompts/compose_system.txt:0-3](../../src/brain/prompts/compose_system.txt#L1-L4)。
 
 ### 3.3 `get_tool_definition()`
 
@@ -113,7 +114,7 @@ inspect_pattern
 
 输入：
 - `list[PatternCard]`
-- `system.txt` 模板
+- `compose_system.txt` 模板
 
 输出：
 - 最终 system prompt 文本
@@ -170,7 +171,7 @@ retrieve_patterns(...) 返回 PatternCard 列表
    - 对模型是友好的，但对程序化消费不够强。
 
 3. `assemble_system_prompt()` 每次都会读模板文件。
-   - 当前规模下没问题，但没有缓存。
+   - 当前通过 `brain.prompts.loader` 做文件读取缓存。
 
 4. 模板目前非常短，没有分层策略或 token 预算控制。
    - 现在实现目标是先把最小闭环搭出来。

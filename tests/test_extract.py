@@ -8,6 +8,7 @@ import pytest
 from brain.models import CleanedComment, PatternCard, FrequencyProfile
 from brain.extract.chunker import chunk_comments
 from brain.extract.refiner import extract_from_chunk, _judge_duplicate_topn, deduplicate_and_merge
+from brain.prompts import load_prompt
 
 
 def _make_comment(rpid: int, message: str) -> CleanedComment:
@@ -66,6 +67,18 @@ class TestExtractFromChunk:
 
         assert cards == []
         assert total_tokens == 8
+
+    def test_renders_numbered_comments_into_prompt(self):
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=("[]", 5, 3),
+        ) as mock_call:
+            extract_from_chunk(["first", "second"])
+
+        rendered_prompt = mock_call.call_args.args[0]
+        assert "1. first" in rendered_prompt
+        assert "2. second" in rendered_prompt
+        assert "{{ comments }}" not in rendered_prompt
 
 
 class TestDeduplicateAndMerge:
@@ -171,12 +184,32 @@ class TestJudgeDuplicateTopN:
         assert idx == 1
         assert keep == "current"
 
+    def test_renders_candidates_into_prompt(self):
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=('{"duplicate_of": 0, "keep_description": "current", "reason": "different"}', 10, 20),
+        ) as mock_call:
+            _judge_duplicate_topn(
+                self._make_card("new", "[A]好家伙"),
+                [self._make_card("c1", "[A]绝了")],
+            )
+
+        rendered_prompt = mock_call.call_args.args[0]
+        assert "--- 候选 1 (c1) ---" in rendered_prompt
+        assert "{{ candidates_block }}" not in rendered_prompt
+
     def test_empty_candidates_returns_none(self):
         idx, keep = _judge_duplicate_topn(
             self._make_card("new", "[A]好家伙"),
             [],
         )
         assert idx is None
+
+
+class TestPromptLoader:
+    def test_loads_extract_prompts(self):
+        assert "JSON 数组" in load_prompt("extract_patterns.txt")
+        assert "duplicate_of" in load_prompt("extract_dedup_judge.txt")
 
 
 @pytest.mark.skipif(

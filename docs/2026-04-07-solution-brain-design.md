@@ -45,8 +45,10 @@ solution-brain/
 │   │   ├── __init__.py
 │   │   ├── menu.py               # 检索相关模式 → 生成"菜单"列表
 │   │   ├── tools.py              # inspect_pattern 工具定义 + 调用处理
-│   │   └── templates/
-│   │       └── system.txt        # system prompt 模板
+│   ├── prompts/                  # 扁平化 prompt 资源目录
+│   │   ├── compose_system.txt
+│   │   ├── extract_patterns.txt
+│   │   └── extract_dedup_judge.txt
 │   └── api/                      # 对外接口（后期实现）
 │       ├── __init__.py
 │       └── service.py            # FastAPI 应用
