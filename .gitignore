@@ -11,3 +11,6 @@
 # Runtime data
 data/
 _storage/
+
+# Iteration docs
+docs/iterations/

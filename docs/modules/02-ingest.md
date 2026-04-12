@@ -57,7 +57,7 @@ SELECT bvid, title FROM videos WHERE crawl_status = 'completed' ORDER BY bvid
 执行 SQL：
 
 ```sql
-SELECT rpid, bvid, uid, message, ctime
+SELECT rpid, bvid, uid, uname, message, ctime, root, parent
 FROM comments
 WHERE bvid = ?
 ORDER BY ctime
@@ -66,6 +66,7 @@ ORDER BY ctime
 特点：
 
 - 每条记录被转成 `CleanedComment`
+- 保留 `uname`、`root`、`parent`，供后续构造评论对
 - 保留顺序为 `ctime` 升序
 - 不在这里做清洗或去重
 
