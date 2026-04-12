@@ -15,9 +15,11 @@
 {
   "duplicate_of": 0,
   "keep_description": "current" 或 "candidate",
+  "keep_examples": "current" 或 "candidate",
   "reason": "一句话说明"
 }
 
 duplicate_of: 候选编号（1 开始），0 表示无重复。
 keep_description: 哪一方的描述更完整准确，仅在有重复时有意义。
+keep_examples: 哪一方的例句更贴近最终应保留的模板，仅在有重复时有意义。
 只输出 JSON，不要其他文字。

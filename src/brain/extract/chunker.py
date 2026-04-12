@@ -37,14 +37,22 @@ def format_comment_pair(pair: CommentPair) -> str:
     )
 
 
-def chunk_comments(
+def chunk_comment_pairs(
     comment_pairs: list[CommentPair], chunk_size: int = 50
-) -> list[list[str]]:
+) -> list[list[CommentPair]]:
     if not comment_pairs:
         return []
 
-    messages = [format_comment_pair(pair) for pair in comment_pairs]
     return [
-        messages[i : i + chunk_size]
-        for i in range(0, len(messages), chunk_size)
+        comment_pairs[i : i + chunk_size]
+        for i in range(0, len(comment_pairs), chunk_size)
+    ]
+
+
+def chunk_comments(
+    comment_pairs: list[CommentPair], chunk_size: int = 50
+) -> list[list[str]]:
+    return [
+        [format_comment_pair(pair) for pair in chunk]
+        for chunk in chunk_comment_pairs(comment_pairs, chunk_size)
     ]

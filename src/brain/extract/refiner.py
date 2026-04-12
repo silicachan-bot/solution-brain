@@ -24,7 +24,7 @@ from brain.config import (
     DEDUP_TOP_N,
     EMBED_DIMENSIONS,
 )
-from brain.models import PatternCard, FrequencyProfile
+from brain.models import CommentPair, FrequencyProfile, PatternCard, PatternOrigin
 from brain.prompts import render_prompt
 
 # 模块级单例，避免每次调用重建连接池
@@ -81,13 +81,13 @@ def _call_llm_streaming(
 def _judge_duplicate_topn(
     card: PatternCard,
     candidates: list[PatternCard],
-) -> tuple[int | None, str]:
+) -> tuple[int | None, str, str]:
     """询问 LLM 候选中是否有和 card 重复的模式。
-    返回 (candidate_index_0based | None, keep_description: 'current'|'candidate')。
-    解析失败或无重复返回 (None, 'current')。
+    返回 (candidate_index_0based | None, keep_description, keep_examples)。
+    解析失败或无重复返回 (None, 'current', 'candidate')。
     """
     if not candidates:
-        return None, "current"
+        return None, "current", "candidate"
 
     parts = []
     for i, c in enumerate(candidates, 1):
@@ -117,17 +117,62 @@ def _judge_duplicate_topn(
         result = json.loads(content)
         dup_of = int(result.get("duplicate_of", 0))
         keep = str(result.get("keep_description", "current"))
+        keep_examples = str(result.get("keep_examples", keep))
         if dup_of < 1 or dup_of > len(candidates):
-            return None, "current"
-        return dup_of - 1, keep
+            return None, "current", "candidate"
+        if keep not in {"current", "candidate"}:
+            keep = "current"
+        if keep_examples not in {"current", "candidate"}:
+            keep_examples = keep
+        return dup_of - 1, keep, keep_examples
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None, "current"
+        return None, "current", "candidate"
+
+
+def _build_origins_for_examples(
+    examples: list[str],
+    comment_pairs: list[CommentPair] | None,
+    video_title: str,
+) -> list[PatternOrigin]:
+    if not comment_pairs:
+        return []
+
+    origins: list[PatternOrigin] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+
+    for example in examples:
+        for pair in comment_pairs:
+            if pair.reply.message != example:
+                continue
+            origin = PatternOrigin(
+                example=example,
+                bvid=pair.reply.bvid,
+                video_title=video_title,
+                parent_message=pair.parent.message,
+                reply_message=pair.reply.message,
+            )
+            key = (
+                origin.example,
+                origin.bvid,
+                origin.video_title,
+                origin.parent_message,
+                origin.reply_message,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            origins.append(origin)
+
+    return origins
 
 
 def extract_from_chunk(
     messages: list[str],
     log_label: str = "",
     on_token: Callable[[int], None] | None = None,
+    *,
+    comment_pairs: list[CommentPair] | None = None,
+    video_title: str = "",
 ) -> tuple[list[PatternCard], int]:
     """返回 (patterns, total_tokens)。total_tokens=0 表示 API 未返回用量信息。"""
     numbered = "\n".join(f"{i+1}. {m}" for i, m in enumerate(messages))
@@ -175,16 +220,18 @@ def extract_from_chunk(
     for p in raw_patterns:
         if not all(k in p for k in ("template", "examples", "description")):
             continue
+        examples = p["examples"][:5]
         cards.append(
             PatternCard(
                 id=f"pat-{uuid.uuid4().hex[:8]}",
                 description=p["description"],
                 template=p["template"],
-                examples=p["examples"][:5],
+                examples=examples,
                 frequency=FrequencyProfile(recent=1, medium=1, long_term=1, total=1),
                 source="bilibili",
                 created_at=now,
                 updated_at=now,
+                origins=_build_origins_for_examples(examples, comment_pairs, video_title),
             )
         )
     return cards, total_tokens
@@ -269,7 +316,7 @@ def _dedup_intra_batch(
             _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
 
             t1 = time.perf_counter()
-            dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+            dup_idx, keep_desc, keep_examples = _judge_duplicate_topn(card, merged)
             t_llm = time.perf_counter() - t1
 
             if dup_idx is not None:
@@ -277,7 +324,7 @@ def _dedup_intra_batch(
                 target = kept[matched.id]
                 if keep_desc == "current":
                     target.description = card.description
-                _merge_into(target, card)
+                _merge_into(target, card, keep_examples=keep_examples)
                 # 更新临时表中的记录
                 new_vec_s = embedder.embed([target.embed_text()])[0]
                 tmp_table.merge_insert("id") \
@@ -292,6 +339,7 @@ def _dedup_intra_batch(
                 _console.print(
                     f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} 重复"
                     f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
+                    f" · 保留例句={'当前' if keep_examples == 'current' else '候选'}"
                     f" · 合并[/green]"
                 )
                 _console.print()
@@ -348,7 +396,7 @@ def _dedup_against_db(
         _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
 
         t2 = time.perf_counter()
-        dup_idx, keep_desc = _judge_duplicate_topn(card, merged)
+        dup_idx, keep_desc, keep_examples = _judge_duplicate_topn(card, merged)
         t_llm = time.perf_counter() - t2
 
         if dup_idx is not None:
@@ -356,11 +404,12 @@ def _dedup_against_db(
             target = updates_by_id.get(matched.id, matched)
             if keep_desc == "current":
                 target.description = card.description
-            _merge_into(target, card)
+            _merge_into(target, card, keep_examples=keep_examples)
             updates_by_id[target.id] = target
             _console.print(
                 f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} ({matched.id}) 重复"
                 f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
+                f" · 保留例句={'当前' if keep_examples == 'current' else '候选'}"
                 f" · 更新已有[/green]"
             )
             _console.print()
@@ -397,15 +446,57 @@ def deduplicate_and_merge(
     return new_cards, updates
 
 
-def _merge_into(target: PatternCard, source: PatternCard) -> None:
+def _merge_into(
+    target: PatternCard,
+    source: PatternCard,
+    *,
+    keep_examples: str = "candidate",
+) -> None:
     target.frequency.recent += source.frequency.recent
     target.frequency.medium += source.frequency.medium
     target.frequency.long_term += source.frequency.long_term
     target.frequency.total += source.frequency.total
 
-    existing_examples = set(target.examples)
-    for ex in source.examples:
-        if ex not in existing_examples and len(target.examples) < 5:
-            target.examples.append(ex)
+    if keep_examples == "current":
+        primary_examples = source.examples
+        secondary_examples = target.examples
+        primary_origins = source.origins
+        secondary_origins = target.origins
+    else:
+        primary_examples = target.examples
+        secondary_examples = source.examples
+        primary_origins = target.origins
+        secondary_origins = source.origins
+
+    merged_examples: list[str] = []
+    seen_examples: set[str] = set()
+    for example in primary_examples + secondary_examples:
+        if example in seen_examples:
+            continue
+        seen_examples.add(example)
+        merged_examples.append(example)
+        if len(merged_examples) >= 5:
+            break
+
+    merged_origins: list[PatternOrigin] = []
+    seen_origins: set[tuple[str, str, str, str, str]] = set()
+    for example in merged_examples:
+        for origin in primary_origins + secondary_origins:
+            if origin.example != example:
+                continue
+            key = (
+                origin.example,
+                origin.bvid,
+                origin.video_title,
+                origin.parent_message,
+                origin.reply_message,
+            )
+            if key in seen_origins:
+                continue
+            seen_origins.add(key)
+            merged_origins.append(origin)
+
+    target.examples = merged_examples
+    target.origins = merged_origins
 
     target.updated_at = datetime.now()

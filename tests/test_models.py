@@ -1,5 +1,5 @@
 from datetime import datetime
-from brain.models import PatternCard, FrequencyProfile, CleanedComment
+from brain.models import CleanedComment, FrequencyProfile, PatternCard, PatternOrigin
 
 
 class TestFrequencyProfile:
@@ -50,12 +50,41 @@ class TestPatternCard:
             source="test",
             created_at=datetime(2026, 1, 1),
             updated_at=datetime(2026, 1, 1),
+            origins=[
+                PatternOrigin(
+                    example="x...y",
+                    bvid="BV1test",
+                    video_title="test video",
+                    parent_message="parent",
+                    reply_message="x...y",
+                )
+            ],
         )
         d = card.to_dict()
         restored = PatternCard.from_dict(d)
         assert restored.id == card.id
         assert restored.template == card.template
         assert restored.frequency.recent == card.frequency.recent
+        assert restored.origins[0].bvid == "BV1test"
+
+    def test_from_dict_compatible_without_origins(self):
+        d = {
+            "id": "pat-legacy",
+            "description": "legacy desc",
+            "template": "[A]legacy",
+            "examples": ["legacy"],
+            "frequency": {
+                "recent": 1,
+                "medium": 2,
+                "long_term": 3,
+                "total": 4,
+            },
+            "source": "test",
+            "created_at": datetime(2026, 1, 1).isoformat(),
+            "updated_at": datetime(2026, 1, 2).isoformat(),
+        }
+        restored = PatternCard.from_dict(d)
+        assert restored.origins == []
 
     def test_embed_text(self):
         fp = FrequencyProfile(recent=1, medium=1, long_term=1, total=1)

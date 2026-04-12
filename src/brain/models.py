@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -21,6 +21,34 @@ class FrequencyProfile:
 
 
 @dataclass
+class PatternOrigin:
+    example: str
+    bvid: str
+    video_title: str
+    parent_message: str
+    reply_message: str
+
+    def to_dict(self) -> dict:
+        return {
+            "example": self.example,
+            "bvid": self.bvid,
+            "video_title": self.video_title,
+            "parent_message": self.parent_message,
+            "reply_message": self.reply_message,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> PatternOrigin:
+        return cls(
+            example=d["example"],
+            bvid=d["bvid"],
+            video_title=d["video_title"],
+            parent_message=d["parent_message"],
+            reply_message=d["reply_message"],
+        )
+
+
+@dataclass
 class PatternCard:
     id: str
     description: str
@@ -30,6 +58,7 @@ class PatternCard:
     source: str
     created_at: datetime
     updated_at: datetime
+    origins: list[PatternOrigin] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +66,7 @@ class PatternCard:
             "description": self.description,
             "template": self.template,
             "examples": self.examples,
+            "origins": [origin.to_dict() for origin in self.origins],
             "frequency": {
                 "recent": self.frequency.recent,
                 "medium": self.frequency.medium,
@@ -56,6 +86,7 @@ class PatternCard:
             description=d["description"],
             template=d["template"],
             examples=d["examples"],
+            origins=[PatternOrigin.from_dict(origin) for origin in (d.get("origins") or [])],
             frequency=FrequencyProfile(
                 recent=freq["recent"],
                 medium=freq["medium"],

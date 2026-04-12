@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from brain.config import BILIBILI_DB_PATH
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.reader import BilibiliReader
-from brain.extract.chunker import build_comment_pairs, chunk_comments
+from brain.extract.chunker import build_comment_pairs, chunk_comment_pairs, chunk_comments
 from brain.extract.refiner import extract_from_chunk
 
 
@@ -21,24 +21,29 @@ def main() -> None:
     args = parser.parse_args()
 
     reader = BilibiliReader(BILIBILI_DB_PATH)
+    videos = {video["bvid"]: video for video in reader.list_videos()}
 
     for bvid in args.bvids:
         comments = clean_comments(reader.read_comments(bvid))
         pairs = build_comment_pairs(comments)
         if args.pair_limit > 0:
             pairs = pairs[:args.pair_limit]
+        pair_chunks = chunk_comment_pairs(pairs, chunk_size=args.chunk_size)
         chunks = chunk_comments(pairs, chunk_size=args.chunk_size)
+        title = videos.get(bvid, {}).get("title", "")
 
         print(f"===== {bvid} =====", flush=True)
         print(f"cleaned_comments={len(comments)} comment_pairs={len(pairs)} chunks={len(chunks)}", flush=True)
 
         all_cards = []
         total_tokens = 0
-        for i, chunk in enumerate(chunks, 1):
+        for i, (chunk, pair_chunk) in enumerate(zip(chunks, pair_chunks, strict=False), 1):
             print(f"running chunk {i}/{len(chunks)}", flush=True)
             cards, tokens = extract_from_chunk(
                 chunk,
                 log_label=f"{bvid} eval chunk {i}/{len(chunks)}",
+                comment_pairs=pair_chunk,
+                video_title=title,
             )
             all_cards.extend(cards)
             total_tokens += tokens

@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from brain.models import FrequencyProfile, PatternCard
-from brain.viewer import filter_patterns, format_pattern_summary, sort_patterns
+from brain.models import FrequencyProfile, PatternCard, PatternOrigin
+from brain.viewer import filter_patterns, format_pattern_summary, group_origins_by_example, sort_patterns
 
 
 def _make_card(
@@ -214,3 +214,38 @@ class TestFormatPatternSummary:
         assert "[A]...好家伙..." in summary
         assert "freshness=" in summary
         assert "total=10" in summary
+
+
+class TestGroupOriginsByExample:
+    def test_groups_origins_for_each_example(self):
+        card = _make_card(
+            "1",
+            description="对离谱情况吐槽",
+            template="[A]...好家伙...",
+            examples=["这也行...好家伙...", "又来了...好家伙..."],
+            updated_day=3,
+            recent=4,
+            medium=8,
+            total=10,
+        )
+        card.origins = [
+            PatternOrigin(
+                example="这也行...好家伙...",
+                bvid="BV1a",
+                video_title="视频A",
+                parent_message="上文A",
+                reply_message="这也行...好家伙...",
+            ),
+            PatternOrigin(
+                example="又来了...好家伙...",
+                bvid="BV1b",
+                video_title="视频B",
+                parent_message="上文B",
+                reply_message="又来了...好家伙...",
+            ),
+        ]
+
+        grouped = group_origins_by_example(card)
+
+        assert grouped["这也行...好家伙..."][0].bvid == "BV1a"
+        assert grouped["又来了...好家伙..."][0].bvid == "BV1b"

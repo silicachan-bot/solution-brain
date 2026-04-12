@@ -5,8 +5,8 @@ from datetime import datetime
 
 import pytest
 
-from brain.models import CleanedComment, CommentPair, PatternCard, FrequencyProfile
-from brain.extract.chunker import build_comment_pairs, chunk_comments, format_comment_pair
+from brain.models import CleanedComment, CommentPair, FrequencyProfile, PatternCard, PatternOrigin
+from brain.extract.chunker import build_comment_pairs, chunk_comment_pairs, chunk_comments, format_comment_pair
 from brain.extract.refiner import extract_from_chunk, _judge_duplicate_topn, deduplicate_and_merge
 from brain.prompts import load_prompt
 
@@ -72,6 +72,19 @@ class TestChunker:
         assert len(chunks[0]) == 50
         assert len(chunks[1]) == 50
         assert len(chunks[2]) == 20
+
+    def test_chunk_comment_pairs_keeps_pair_objects(self):
+        pairs = [
+            CommentPair(
+                parent=_make_comment(i, f"parent {i}"),
+                reply=_make_comment(i + 1000, f"reply {i}", root=i, parent=i),
+            )
+            for i in range(3)
+        ]
+        chunks = chunk_comment_pairs(pairs, chunk_size=2)
+        assert len(chunks) == 2
+        assert chunks[0][0].reply.message == "reply 0"
+        assert chunks[1][0].reply.message == "reply 2"
 
     def test_small_input(self):
         pairs = [
@@ -144,6 +157,59 @@ class TestExtractFromChunk:
         assert "评论对" in rendered_prompt
         assert "{{ comments }}" not in rendered_prompt
 
+    def test_attaches_origins_for_exact_matching_examples(self):
+        mock_patterns = [
+            {
+                "template": "神TM[A]",
+                "examples": ["神TM夜神月[笑哭]"],
+                "description": "表达惊讶和吐槽",
+            }
+        ]
+        pair = CommentPair(
+            parent=_make_comment(1, "这个比喻太怪了"),
+            reply=_make_comment(2, "神TM夜神月[笑哭]", root=1, parent=1),
+        )
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=(json.dumps(mock_patterns, ensure_ascii=False), 10, 20),
+        ):
+            cards, _ = extract_from_chunk(
+                ["上文评论：这个比喻太怪了\n回复评论：神TM夜神月[笑哭]"],
+                comment_pairs=[pair],
+                video_title="测试视频",
+            )
+
+        assert len(cards) == 1
+        assert len(cards[0].origins) == 1
+        assert cards[0].origins[0].bvid == "BV1test"
+        assert cards[0].origins[0].video_title == "测试视频"
+        assert cards[0].origins[0].parent_message == "这个比喻太怪了"
+
+    def test_skips_origin_when_example_not_exact_reply(self):
+        mock_patterns = [
+            {
+                "template": "神TM[A]",
+                "examples": ["神TM夜神月"],
+                "description": "表达惊讶和吐槽",
+            }
+        ]
+        pair = CommentPair(
+            parent=_make_comment(1, "这个比喻太怪了"),
+            reply=_make_comment(2, "神TM夜神月[笑哭]", root=1, parent=1),
+        )
+        with patch(
+            "brain.extract.refiner._call_llm_streaming",
+            return_value=(json.dumps(mock_patterns, ensure_ascii=False), 10, 20),
+        ):
+            cards, _ = extract_from_chunk(
+                ["上文评论：这个比喻太怪了\n回复评论：神TM夜神月[笑哭]"],
+                comment_pairs=[pair],
+                video_title="测试视频",
+            )
+
+        assert len(cards) == 1
+        assert cards[0].origins == []
+
 
 class TestDeduplicateAndMerge:
     def _make_card(self, cid: str, template: str, description: str = "默认",
@@ -164,7 +230,7 @@ class TestDeduplicateAndMerge:
             self._make_card("1", "[A]不同A", description="descA", examples=["exA"]),
             self._make_card("2", "[A]不同B", description="descB", examples=["exB"]),
         ]
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current", "candidate")):
             new, updates = deduplicate_and_merge(cards, db, embedder)
         assert len(new) == 2
         assert len(updates) == 0
@@ -177,7 +243,7 @@ class TestDeduplicateAndMerge:
             self._make_card("1", same_tmpl, description=same_desc, examples=same_ex),
             self._make_card("2", same_tmpl, description=same_desc, examples=same_ex),
         ]
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "candidate")):
             new, updates = deduplicate_and_merge(cards, db, embedder)
         assert len(new) == 1
         assert len(updates) == 0
@@ -191,7 +257,7 @@ class TestDeduplicateAndMerge:
         db.save([existing])
 
         new_card = self._make_card("new-1", same_tmpl, description=same_desc, examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "candidate")):
             new, updates = deduplicate_and_merge([new_card], db, embedder)
         assert len(new) == 0
         assert len(updates) == 1
@@ -213,45 +279,50 @@ class TestJudgeDuplicateTopN:
     def test_finds_duplicate_in_candidates(self):
         resp = '{"duplicate_of": 1, "keep_description": "candidate", "reason": "same"}'
         with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
-            idx, keep = _judge_duplicate_topn(
+            idx, keep_desc, keep_examples = _judge_duplicate_topn(
                 self._make_card("new", "[A]好家伙"),
                 [self._make_card("c1", "[A]好家伙[B]"), self._make_card("c2", "[A]绝了")],
             )
         assert idx == 0
-        assert keep == "candidate"
+        assert keep_desc == "candidate"
+        assert keep_examples == "candidate"
 
     def test_no_duplicate_returns_none(self):
         resp = '{"duplicate_of": 0, "keep_description": "current", "reason": "all different"}'
         with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
-            idx, keep = _judge_duplicate_topn(
+            idx, keep_desc, keep_examples = _judge_duplicate_topn(
                 self._make_card("new", "[A]好家伙"),
                 [self._make_card("c1", "[A]绝了")],
             )
         assert idx is None
+        assert keep_desc == "current"
+        assert keep_examples == "candidate"
 
     def test_parse_error_returns_none(self):
         with patch("brain.extract.refiner._call_llm_streaming", return_value=("bad json", 5, 5)):
-            idx, keep = _judge_duplicate_topn(
+            idx, keep_desc, keep_examples = _judge_duplicate_topn(
                 self._make_card("new", "[A]好家伙"),
                 [self._make_card("c1", "[A]绝了")],
             )
         assert idx is None
-        assert keep == "current"
+        assert keep_desc == "current"
+        assert keep_examples == "candidate"
 
     def test_handles_markdown_code_fence(self):
         resp = '```json\n{"duplicate_of": 2, "keep_description": "current", "reason": "same"}\n```'
         with patch("brain.extract.refiner._call_llm_streaming", return_value=(resp, 10, 20)):
-            idx, keep = _judge_duplicate_topn(
+            idx, keep_desc, keep_examples = _judge_duplicate_topn(
                 self._make_card("new", "[A]好家伙"),
                 [self._make_card("c1", "[A]绝了"), self._make_card("c2", "[A]好家伙[B]")],
             )
         assert idx == 1
-        assert keep == "current"
+        assert keep_desc == "current"
+        assert keep_examples == "current"
 
     def test_renders_candidates_into_prompt(self):
         with patch(
             "brain.extract.refiner._call_llm_streaming",
-            return_value=('{"duplicate_of": 0, "keep_description": "current", "reason": "different"}', 10, 20),
+            return_value=('{"duplicate_of": 0, "keep_description": "current", "keep_examples": "candidate", "reason": "different"}', 10, 20),
         ) as mock_call:
             _judge_duplicate_topn(
                 self._make_card("new", "[A]好家伙"),
@@ -263,11 +334,13 @@ class TestJudgeDuplicateTopN:
         assert "{{ candidates_block }}" not in rendered_prompt
 
     def test_empty_candidates_returns_none(self):
-        idx, keep = _judge_duplicate_topn(
+        idx, keep_desc, keep_examples = _judge_duplicate_topn(
             self._make_card("new", "[A]好家伙"),
             [],
         )
         assert idx is None
+        assert keep_desc == "current"
+        assert keep_examples == "candidate"
 
 
 class TestPromptLoader:
@@ -317,6 +390,15 @@ class TestIntraBatchDedup:
             updated_at=datetime(2026, 1, 1),
         )
 
+    def _make_origin(self, example: str, suffix: str) -> PatternOrigin:
+        return PatternOrigin(
+            example=example,
+            bvid=f"BV{suffix}",
+            video_title=f"视频{suffix}",
+            parent_message=f"上文{suffix}",
+            reply_message=example,
+        )
+
     def test_single_card_passes_through(self):
         embedder = MockEmbedder()
         card = self._make_card("1", "[A]模式")
@@ -328,7 +410,7 @@ class TestIntraBatchDedup:
         embedder = MockEmbedder()
         card_a = self._make_card("1", "[A]完全不同A", description="descA", examples=["exA"])
         card_b = self._make_card("2", "[A]完全不同B", description="descB", examples=["exB"])
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current", "candidate")):
             result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 2
 
@@ -337,7 +419,7 @@ class TestIntraBatchDedup:
         same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
         card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
         card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current", "candidate")):
             result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 1
         assert result[0].id == "1"
@@ -349,7 +431,7 @@ class TestIntraBatchDedup:
         card_a = self._make_card("1", same_tmpl, description="旧描述", examples=same_ex)
         card_b = self._make_card("2", same_tmpl, description="旧描述", examples=same_ex)
         card_b.description = "更好的描述"
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current", "candidate")):
             result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 1
         assert result[0].description == "更好的描述"
@@ -359,9 +441,24 @@ class TestIntraBatchDedup:
         same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
         card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
         card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current", "candidate")):
             result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 2
+
+    def test_examples_reordered_when_keep_examples_current(self):
+        embedder = MockEmbedder()
+        card_a = self._make_card("1", "[A]模式", examples=["旧例句"])
+        card_b = self._make_card("2", "[A]模式", examples=["新例句", "旧例句"])
+        card_a.origins = [self._make_origin("旧例句", "old")]
+        card_b.origins = [
+            self._make_origin("新例句", "new"),
+            self._make_origin("旧例句", "new-old"),
+        ]
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "current")):
+            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+        assert len(result) == 1
+        assert result[0].examples[:2] == ["新例句", "旧例句"]
+        assert result[0].origins[0].bvid == "BVnew"
 
 
 class TestCrossDbDedup:
@@ -374,6 +471,15 @@ class TestCrossDbDedup:
             source="test",
             created_at=datetime(2026, 1, 1),
             updated_at=datetime(2026, 1, 1),
+        )
+
+    def _make_origin(self, example: str, suffix: str) -> PatternOrigin:
+        return PatternOrigin(
+            example=example,
+            bvid=f"BV{suffix}",
+            video_title=f"视频{suffix}",
+            parent_message=f"上文{suffix}",
+            reply_message=example,
         )
 
     def test_empty_db_returns_all_as_new(self, tmp_path):
@@ -391,7 +497,7 @@ class TestCrossDbDedup:
         db.save([existing])
 
         new_card = self._make_card("new-1", same_tmpl, description=same_desc, examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "candidate")):
             new, updates = _dedup_against_db([new_card], db, top_n=3)
 
         assert len(new) == 0
@@ -405,7 +511,7 @@ class TestCrossDbDedup:
         db.save([existing])
 
         new_card = self._make_card("new-1", "[A]完全不同B", description="descB", examples=["exB"])
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, "current", "candidate")):
             new, updates = _dedup_against_db([new_card], db, top_n=3)
 
         assert len(new) == 1
@@ -418,7 +524,7 @@ class TestCrossDbDedup:
         db.save([existing])
 
         new_card = self._make_card("new-1", same_tmpl, description="更好的新描述", examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current", "candidate")):
             new, updates = _dedup_against_db([new_card], db, top_n=3)
 
         assert len(updates) == 1
@@ -433,9 +539,27 @@ class TestCrossDbDedup:
 
         card_x = self._make_card("x", same_tmpl, description=same_desc, examples=same_ex)
         card_y = self._make_card("y", same_tmpl, description=same_desc, examples=same_ex)
-        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate")):
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "candidate")):
             new, updates = _dedup_against_db([card_x, card_y], db, top_n=3)
 
         assert len(new) == 0
         assert len(updates) == 1
         assert updates[0].frequency.total == 7
+
+    def test_examples_updated_when_keep_examples_current(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        existing = self._make_card("existing-1", "[A]好家伙", examples=["旧例句"])
+        existing.origins = [self._make_origin("旧例句", "old")]
+        db.save([existing])
+
+        new_card = self._make_card("new-1", "[A]好家伙", examples=["新例句", "旧例句"])
+        new_card.origins = [
+            self._make_origin("新例句", "new"),
+            self._make_origin("旧例句", "new-old"),
+        ]
+        with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "current")):
+            new, updates = _dedup_against_db([new_card], db, top_n=3)
+
+        assert len(new) == 0
+        assert updates[0].examples[:2] == ["新例句", "旧例句"]
+        assert updates[0].origins[0].bvid == "BVnew"

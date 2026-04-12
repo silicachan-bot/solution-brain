@@ -11,7 +11,7 @@ from brain.compose.menu import build_menu
 from brain.config import LANCEDB_DIR, RETRIEVAL_TOP_K
 from brain.store.pattern_db import PatternDB
 from brain.store.retriever import retrieve_patterns
-from brain.viewer import filter_patterns, format_pattern_summary, sort_patterns
+from brain.viewer import filter_patterns, format_pattern_summary, group_origins_by_example, sort_patterns
 
 
 st.set_page_config(page_title="solution-brain 模式库", layout="wide")
@@ -26,6 +26,7 @@ def get_db() -> PatternDB:
 
 def render_pattern_card(card) -> None:
     with st.expander(format_pattern_summary(card), expanded=False):
+        origins_by_example = group_origins_by_example(card)
         st.markdown(f"**ID**: `{card.id}`")
         st.markdown(f"**模板**: `{card.template}`")
         st.markdown(f"**描述**: {card.description}")
@@ -45,6 +46,15 @@ def render_pattern_card(card) -> None:
         st.markdown("**例句**")
         for example in card.examples:
             st.markdown(f"- {example}")
+            origins = origins_by_example.get(example, [])
+            if not origins:
+                st.caption("来源缺失")
+                continue
+            for origin in origins:
+                title = origin.video_title or "无标题"
+                st.caption(f"{title} ({origin.bvid})")
+                st.markdown(f"上文评论：{origin.parent_message}")
+                st.markdown(f"回复评论：{origin.reply_message}")
 
 
 def main() -> None:

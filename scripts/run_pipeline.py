@@ -21,7 +21,7 @@ from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, STATE_FILE
 from brain.ingest.reader import BilibiliReader
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.state import WatermarkState
-from brain.extract.chunker import build_comment_pairs, chunk_comments
+from brain.extract.chunker import build_comment_pairs, chunk_comment_pairs, chunk_comments
 from brain.extract.refiner import extract_from_chunk, deduplicate_and_merge
 from brain.store.pattern_db import PatternDB
 from brain.store.embedding import QwenEmbedder
@@ -141,6 +141,7 @@ def main():
                 live.update(make_display())
                 continue
 
+            pair_chunks = chunk_comment_pairs(comment_pairs, chunk_size=args.chunk_size)
             chunks = chunk_comments(comment_pairs, chunk_size=args.chunk_size)
 
             progress.update(
@@ -156,7 +157,7 @@ def main():
             video_tokens = 0
             video_patterns: list = []
 
-            for j, chunk in enumerate(chunks, 1):
+            for j, (chunk, pair_chunk) in enumerate(zip(chunks, pair_chunks, strict=False), 1):
                 streaming_tokens = 0
                 progress.update(chunk_task, description=f"[green]分块 {j}/{len(chunks)}")
                 live.update(make_display())
@@ -168,7 +169,13 @@ def main():
                         _live.update(make_display())
 
                 log_label = f"{bvid} chunk {j}/{len(chunks)}"
-                patterns, tokens = extract_from_chunk(chunk, log_label=log_label, on_token=on_token)
+                patterns, tokens = extract_from_chunk(
+                    chunk,
+                    log_label=log_label,
+                    on_token=on_token,
+                    comment_pairs=pair_chunk,
+                    video_title=title,
+                )
 
                 video_tokens += tokens
                 total_tokens += tokens

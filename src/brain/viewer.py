@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from brain.models import PatternCard
+from brain.models import PatternCard, PatternOrigin
 
 
 _SORT_OPTIONS = {"updated_at", "freshness", "template"}
@@ -18,6 +18,16 @@ def filter_patterns(patterns: list[PatternCard], query: str) -> list[PatternCard
                 card.template,
                 card.description,
                 *card.examples,
+                *[
+                    "\n".join([
+                        origin.example,
+                        origin.bvid,
+                        origin.video_title,
+                        origin.parent_message,
+                        origin.reply_message,
+                    ])
+                    for origin in card.origins
+                ],
             ]
         ).lower()
         if needle in haystack:
@@ -47,3 +57,11 @@ def format_pattern_summary(card: PatternCard) -> str:
         f"{card.template} | "
         f"freshness={card.frequency.freshness:.2f} | total={card.frequency.total}"
     )
+
+
+def group_origins_by_example(card: PatternCard) -> dict[str, list[PatternOrigin]]:
+    grouped = {example: [] for example in card.examples}
+    for origin in card.origins:
+        if origin.example in grouped:
+            grouped[origin.example].append(origin)
+    return grouped
