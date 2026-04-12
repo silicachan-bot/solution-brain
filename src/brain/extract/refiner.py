@@ -15,7 +15,15 @@ import lancedb
 import pyarrow as pa
 from rich.console import Console
 
-from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL, DEDUP_TOP_N, EMBED_DIMENSIONS
+from brain.config import (
+    DATA_DIR,
+    DEDUP_SIMILARITY_THRESHOLD,
+    DEDUP_TOP_N,
+    EMBED_DIMENSIONS,
+    LLM_API_BASE,
+    LLM_API_KEY,
+    LLM_MODEL,
+)
 from brain.models import PatternCard, FrequencyProfile
 from brain.prompts import render_prompt
 
@@ -194,10 +202,19 @@ def _merge_hits(
     return list(seen.values())
 
 
+def _filter_hits_by_similarity(
+    hits: list[tuple[PatternCard, float]],
+    threshold: float,
+) -> list[tuple[PatternCard, float]]:
+    """仅保留达到相似度阈值的候选。"""
+    return [(card, score) for card, score in hits if score >= threshold]
+
+
 def _dedup_intra_batch(
     cards: list[PatternCard],
     embedder,
     top_n: int = DEDUP_TOP_N,
+    similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
 ) -> list[PatternCard]:
     """批次内去重：用临时 LanceDB 表做双路检索（vec_template + vec_semantic），
     合并候选后交 LLM 判重。日志并列输出两路结果。
@@ -248,7 +265,9 @@ def _dedup_intra_batch(
                 for r in tmp_table.search(vec_s, vector_column_name="vec_semantic")
                     .metric("cosine").limit(n).to_list()
             ]
-            merged = _merge_hits(hits_tmpl, hits_sem)
+            filtered_tmpl = _filter_hits_by_similarity(hits_tmpl, similarity_threshold)
+            filtered_sem = _filter_hits_by_similarity(hits_sem, similarity_threshold)
+            merged = _merge_hits(filtered_tmpl, filtered_sem)
 
             tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl)
             sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem)
@@ -258,6 +277,16 @@ def _dedup_intra_batch(
             )
             _console.print(f"  vec_template: {tmpl_str}")
             _console.print(f"  vec_semantic: {sem_str}")
+
+            if not merged:
+                _console.print(
+                    f"  [dim]阈值过滤后无候选 (threshold={similarity_threshold:.2f})，直接保留[/dim]"
+                )
+                _console.print()
+                tmp_table.add([row])
+                kept[card.id] = card
+                continue
+
             _console.print(f"  合并候选(去重): {len(merged)}个 → LLM 判断")
 
             t1 = time.perf_counter()
@@ -301,6 +330,7 @@ def _dedup_against_db(
     cards: list[PatternCard],
     db,
     top_n: int = DEDUP_TOP_N,
+    similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
 ) -> tuple[list[PatternCard], list[PatternCard]]:
     """入库前去重：每张新卡片对 DB 做双路检索（vec_template + vec_semantic），
     合并候选后交 LLM 判重。若多张新卡片都与同一已有卡片重复，合并到同一对象上。
@@ -318,16 +348,20 @@ def _dedup_against_db(
         hits_sem = db.query_by_semantic(card.embed_text(), top_k=top_n)
         t_sem = time.perf_counter() - t1
 
-        if not hits_tmpl and not hits_sem:
+        filtered_tmpl = _filter_hits_by_similarity(hits_tmpl, similarity_threshold)
+        filtered_sem = _filter_hits_by_similarity(hits_sem, similarity_threshold)
+
+        if not filtered_tmpl and not filtered_sem:
             _console.print(
                 f"入库去重  [cyan]{card.template!r}[/cyan]"
-                f"  [dim]embed+检索 {(t_tmpl+t_sem)*1000:.0f}ms[/dim]  [dim]无候选，直接新增[/dim]"
+                f"  [dim]embed+检索 {(t_tmpl+t_sem)*1000:.0f}ms[/dim]"
+                f"  [dim]阈值过滤后无候选 (threshold={similarity_threshold:.2f})，直接新增[/dim]"
             )
             _console.print()
             new_cards.append(card)
             continue
 
-        merged = _merge_hits(hits_tmpl, hits_sem)
+        merged = _merge_hits(filtered_tmpl, filtered_sem)
 
         tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl) or "(空)"
         sem_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem) or "(空)"
@@ -370,17 +404,21 @@ def deduplicate_and_merge(
     db,
     embedder,
     top_n: int = DEDUP_TOP_N,
+    similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
 ) -> tuple[list[PatternCard], list[PatternCard]]:
     """两阶段去重：批次内相互去重 → 入库前与 DB 比对。
     使用 LanceDB 双向量列（vec_template + vec_semantic）做双路检索。
     返回 (new_cards, updated_existing_cards)。
     """
-    _console.print(f"\n[bold]开始去重[/bold]: {len(cards)} 个待入库模式，top_n={top_n}")
+    _console.print(
+        f"\n[bold]开始去重[/bold]: {len(cards)} 个待入库模式，"
+        f"top_n={top_n}, similarity_threshold={similarity_threshold:.2f}"
+    )
 
-    deduped = _dedup_intra_batch(cards, embedder, top_n)
+    deduped = _dedup_intra_batch(cards, embedder, top_n, similarity_threshold)
     _console.print(f"\n批次内去重完成: {len(cards)} → [bold]{len(deduped)}[/bold] 个\n")
 
-    new_cards, updates = _dedup_against_db(deduped, db, top_n)
+    new_cards, updates = _dedup_against_db(deduped, db, top_n, similarity_threshold)
     _console.print(
         f"\n去重完成: 新增 [green]{len(new_cards)}[/green] 个,"
         f" 更新 [yellow]{len(updates)}[/yellow] 个"
