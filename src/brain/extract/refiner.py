@@ -344,9 +344,8 @@ def _dedup_intra_batch(
             if dup_idx is not None:
                 matched = merged[dup_idx]
                 target = kept[matched.id]
-                if keep_desc == "current":
-                    target.description = card.description
-                _merge_into(target, card, keep_examples=keep_examples)
+                _merge_into(target, card)
+                target.description = _enrich_description(target, card)
                 # 更新临时表中的记录
                 new_vec_s = embedder.embed([target.embed_text()])[0]
                 tmp_table.merge_insert("id") \
@@ -360,9 +359,7 @@ def _dedup_intra_batch(
                     }])
                 _console.print(
                     f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} 重复"
-                    f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
-                    f" · 保留例句={'当前' if keep_examples == 'current' else '候选'}"
-                    f" · 合并[/green]"
+                    f" · 例句已合并 · 描述已增补[/green]"
                 )
                 _console.print()
                 continue
@@ -429,15 +426,12 @@ def _dedup_against_db(
         if dup_idx is not None:
             matched = merged[dup_idx]
             target = updates_by_id.get(matched.id, matched)
-            if keep_desc == "current":
-                target.description = card.description
-            _merge_into(target, card, keep_examples=keep_examples)
+            _merge_into(target, card)
+            target.description = _enrich_description(target, card)
             updates_by_id[target.id] = target
             _console.print(
                 f"  [green]→ LLM ({t_llm:.1f}s): 与 {matched.template!r} ({matched.id}) 重复"
-                f" · 保留描述={'当前' if keep_desc == 'current' else '候选'}"
-                f" · 保留例句={'当前' if keep_examples == 'current' else '候选'}"
-                f" · 更新已有[/green]"
+                f" · 例句已合并 · 描述已增补 · 更新已有[/green]"
             )
             _console.print()
             continue
@@ -477,42 +471,42 @@ def deduplicate_and_merge(
     return new_cards, updates
 
 
-def _merge_into(
-    target: PatternCard,
-    source: PatternCard,
-    *,
-    keep_examples: str = "candidate",
-) -> None:
+def _enrich_description(target: PatternCard, incoming: PatternCard) -> str:
+    """基于原有描述 + 新增描述 + 全量例句，调用 LLM 生成更丰富的结构化描述。
+    LLM 调用失败时回退到原有描述。
+    """
+    examples_text = "\n".join(f"- {e}" for e in target.examples)
+    prompt = render_prompt(
+        "extract_merge_description.txt",
+        template=target.template,
+        existing_description=target.description,
+        new_description=incoming.description,
+        examples=examples_text,
+    )
+    content, _, _ = _call_llm_streaming(prompt)
+    content = content.strip()
+    return content if content else target.description
+
+
+def _merge_into(target: PatternCard, source: PatternCard) -> None:
+    """合并 source 的频率统计、例句和来源到 target，全量保留例句（不设上限）。"""
     target.frequency.recent += source.frequency.recent
     target.frequency.medium += source.frequency.medium
     target.frequency.long_term += source.frequency.long_term
     target.frequency.total += source.frequency.total
 
-    if keep_examples == "current":
-        primary_examples = source.examples
-        secondary_examples = target.examples
-        primary_origins = source.origins
-        secondary_origins = target.origins
-    else:
-        primary_examples = target.examples
-        secondary_examples = source.examples
-        primary_origins = target.origins
-        secondary_origins = source.origins
-
     merged_examples: list[str] = []
     seen_examples: set[str] = set()
-    for example in primary_examples + secondary_examples:
+    for example in target.examples + source.examples:
         if example in seen_examples:
             continue
         seen_examples.add(example)
         merged_examples.append(example)
-        if len(merged_examples) >= 5:
-            break
 
     merged_origins: list[PatternOrigin] = []
     seen_origins: set[tuple[str, str, str, str, str]] = set()
     for example in merged_examples:
-        for origin in primary_origins + secondary_origins:
+        for origin in target.origins + source.origins:
             if origin.example != example:
                 continue
             key = (

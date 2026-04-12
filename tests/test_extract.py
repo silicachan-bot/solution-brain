@@ -425,16 +425,17 @@ class TestIntraBatchDedup:
         assert result[0].id == "1"
         assert result[0].frequency.total == 2
 
-    def test_description_updated_when_keep_current(self):
+    def test_description_enriched_on_merge(self):
         embedder = MockEmbedder()
         same_tmpl, same_ex = "[A]好家伙", ["好家伙"]
         card_a = self._make_card("1", same_tmpl, description="旧描述", examples=same_ex)
-        card_b = self._make_card("2", same_tmpl, description="旧描述", examples=same_ex)
-        card_b.description = "更好的描述"
+        card_b = self._make_card("2", same_tmpl, description="更好的描述", examples=same_ex)
         with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current", "candidate")):
-            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+            with patch("brain.extract.refiner._enrich_description", return_value="增补后描述") as mock_enrich:
+                result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 1
-        assert result[0].description == "更好的描述"
+        assert mock_enrich.called
+        assert result[0].description == "增补后描述"
 
     def test_non_duplicate_keeps_both(self):
         embedder = MockEmbedder()
@@ -445,7 +446,7 @@ class TestIntraBatchDedup:
             result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 2
 
-    def test_examples_reordered_when_keep_examples_current(self):
+    def test_examples_merged_from_both(self):
         embedder = MockEmbedder()
         card_a = self._make_card("1", "[A]模式", examples=["旧例句"])
         card_b = self._make_card("2", "[A]模式", examples=["新例句", "旧例句"])
@@ -455,10 +456,12 @@ class TestIntraBatchDedup:
             self._make_origin("旧例句", "new-old"),
         ]
         with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "current")):
-            result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+            with patch("brain.extract.refiner._enrich_description", return_value="增补描述"):
+                result = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
         assert len(result) == 1
-        assert result[0].examples[:2] == ["新例句", "旧例句"]
-        assert result[0].origins[0].bvid == "BVnew"
+        # target=card_a, source=card_b；全量合并后去重：target 在前
+        assert result[0].examples == ["旧例句", "新例句"]
+        assert result[0].origins[0].bvid == "BVold"
 
     def test_low_similarity_skips_llm(self):
         embedder = MockEmbedder()
@@ -548,18 +551,20 @@ class TestCrossDbDedup:
         assert len(new) == 1
         assert len(updates) == 0
 
-    def test_description_updated_when_keep_current(self, tmp_path):
+    def test_description_enriched_on_merge(self, tmp_path):
         db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
-        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        same_tmpl, same_ex = "[A]好家伙", ["好家伙"]
         existing = self._make_card("existing-1", same_tmpl, description="旧描述", examples=same_ex)
         db.save([existing])
 
         new_card = self._make_card("new-1", same_tmpl, description="更好的新描述", examples=same_ex)
         with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "current", "candidate")):
-            new, updates = _dedup_against_db([new_card], db, top_n=3)
+            with patch("brain.extract.refiner._enrich_description", return_value="增补后描述") as mock_enrich:
+                new, updates = _dedup_against_db([new_card], db, top_n=3)
 
         assert len(updates) == 1
-        assert updates[0].description == "更好的新描述"
+        assert mock_enrich.called
+        assert updates[0].description == "增补后描述"
 
     def test_two_new_cards_merge_into_same_existing(self, tmp_path):
         db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
@@ -577,7 +582,7 @@ class TestCrossDbDedup:
         assert len(updates) == 1
         assert updates[0].frequency.total == 7
 
-    def test_examples_updated_when_keep_examples_current(self, tmp_path):
+    def test_examples_merged_from_both(self, tmp_path):
         db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
         existing = self._make_card("existing-1", "[A]好家伙", examples=["旧例句"])
         existing.origins = [self._make_origin("旧例句", "old")]
@@ -589,11 +594,13 @@ class TestCrossDbDedup:
             self._make_origin("旧例句", "new-old"),
         ]
         with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(0, "candidate", "current")):
-            new, updates = _dedup_against_db([new_card], db, top_n=3)
+            with patch("brain.extract.refiner._enrich_description", return_value="增补描述"):
+                new, updates = _dedup_against_db([new_card], db, top_n=3)
 
         assert len(new) == 0
-        assert updates[0].examples[:2] == ["新例句", "旧例句"]
-        assert updates[0].origins[0].bvid == "BVnew"
+        # target=existing, source=new_card；全量合并后去重：target 在前
+        assert updates[0].examples == ["旧例句", "新例句"]
+        assert updates[0].origins[0].bvid == "BVold"
 
     def test_low_similarity_db_candidate_skips_llm(self, tmp_path):
         embedder = MockEmbedder()

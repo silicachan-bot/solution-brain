@@ -42,7 +42,7 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "Qwen/Qwen3-Embedding-4B")
 EMBED_DIMENSIONS = int(os.environ.get("EMBED_DIMENSIONS", "2048"))
 
 # Extraction
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "50"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "100"))
 MIN_COMMENT_LENGTH = int(os.environ.get("MIN_COMMENT_LENGTH", "5"))
 
 # Retrieval
