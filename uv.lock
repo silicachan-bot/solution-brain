@@ -80,6 +80,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "streamlit" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -96,6 +97,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "streamlit", specifier = ">=1.44.0" },
+    { name = "tqdm", specifier = ">=4.67.3" },
 ]
 provides-extras = ["dev"]
 
