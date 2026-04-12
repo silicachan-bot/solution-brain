@@ -460,6 +460,37 @@ class TestIntraBatchDedup:
         assert result[0].examples[:2] == ["新例句", "旧例句"]
         assert result[0].origins[0].bvid == "BVnew"
 
+    def test_low_similarity_skips_llm(self):
+        embedder = MockEmbedder()
+        card_a = self._make_card("1", "[A]完全不同A", description="descA", examples=["exA"])
+        card_b = self._make_card("2", "[A]完全不同B", description="descB", examples=["exB"])
+        with patch("brain.extract.refiner._judge_duplicate_topn") as mock_judge:
+            result = _dedup_intra_batch(
+                [card_a, card_b],
+                embedder,
+                top_n=3,
+                similarity_threshold=0.8,
+            )
+        assert len(result) == 2
+        mock_judge.assert_not_called()
+
+    def test_high_similarity_still_calls_llm(self):
+        embedder = MockEmbedder()
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
+        card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
+        with patch(
+            "brain.extract.refiner._judge_duplicate_topn",
+            return_value=(0, "current", "candidate"),
+        ) as mock_judge:
+            _dedup_intra_batch(
+                [card_a, card_b],
+                embedder,
+                top_n=3,
+                similarity_threshold=0.8,
+            )
+        mock_judge.assert_called_once()
+
 
 class TestCrossDbDedup:
     def _make_card(self, cid: str, template: str, description: str = "默认描述",
@@ -563,3 +594,22 @@ class TestCrossDbDedup:
         assert len(new) == 0
         assert updates[0].examples[:2] == ["新例句", "旧例句"]
         assert updates[0].origins[0].bvid == "BVnew"
+
+    def test_low_similarity_db_candidate_skips_llm(self, tmp_path):
+        embedder = MockEmbedder()
+        db = PatternDB(tmp_path / "lance", embedder=embedder)
+        existing = self._make_card("existing-1", "[A]完全不同A", description="descA", examples=["exA"])
+        db.save([existing])
+
+        new_card = self._make_card("new-1", "[A]完全不同B", description="descB", examples=["exB"])
+        with patch("brain.extract.refiner._judge_duplicate_topn") as mock_judge:
+            new, updates = _dedup_against_db(
+                [new_card],
+                db,
+                top_n=3,
+                similarity_threshold=0.8,
+            )
+
+        assert len(new) == 1
+        assert len(updates) == 0
+        mock_judge.assert_not_called()
