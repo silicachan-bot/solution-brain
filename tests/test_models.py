@@ -81,8 +81,10 @@ class TestCleanedComment:
             rpid=123,
             bvid="BV1test",
             uid=456,
+            uname="tester",
             message="hello world",
             ctime=1700000000,
         )
         assert c.rpid == 123
+        assert c.uname == "tester"
         assert c.message == "hello world"

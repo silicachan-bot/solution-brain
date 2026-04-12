@@ -21,7 +21,7 @@ from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, STATE_FILE
 from brain.ingest.reader import BilibiliReader
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.state import WatermarkState
-from brain.extract.chunker import chunk_comments
+from brain.extract.chunker import build_comment_pairs, chunk_comments
 from brain.extract.refiner import extract_from_chunk, deduplicate_and_merge
 from brain.store.pattern_db import PatternDB
 from brain.store.embedding import QwenEmbedder
@@ -76,9 +76,13 @@ def main():
             bvid = video["bvid"]
             comments = reader.read_comments(bvid)
             cleaned = clean_comments(comments)
-            chunks = chunk_comments(cleaned, chunk_size=args.chunk_size)
+            comment_pairs = build_comment_pairs(cleaned)
+            chunks = chunk_comments(comment_pairs, chunk_size=args.chunk_size)
             print(f"[{i}/{len(videos)}] {bvid} — {video.get('title','无标题')}")
-            print(f"  评论: {len(comments)} → 清洗后: {len(cleaned)} → {len(chunks)} 块 [dry-run]")
+            print(
+                f"  评论: {len(comments)} → 清洗后: {len(cleaned)} "
+                f"→ 评论对: {len(comment_pairs)} → {len(chunks)} 块 [dry-run]"
+            )
         return
 
     # 3. 逐视频处理（Rich 实时展示）
@@ -130,13 +134,14 @@ def main():
 
             comments = reader.read_comments(bvid)
             cleaned = clean_comments(comments)
+            comment_pairs = build_comment_pairs(cleaned)
 
-            if not cleaned:
+            if not comment_pairs:
                 progress.advance(video_task)
                 live.update(make_display())
                 continue
 
-            chunks = chunk_comments(cleaned, chunk_size=args.chunk_size)
+            chunks = chunk_comments(comment_pairs, chunk_size=args.chunk_size)
 
             progress.update(
                 chunk_task,

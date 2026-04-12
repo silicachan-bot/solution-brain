@@ -78,5 +78,14 @@ class CleanedComment:
     rpid: int
     bvid: str
     uid: int
+    uname: str
     message: str
     ctime: int
+    root: int = 0
+    parent: int = 0
+
+
+@dataclass
+class CommentPair:
+    parent: CleanedComment
+    reply: CleanedComment

@@ -15,12 +15,20 @@ import lancedb
 import pyarrow as pa
 from rich.console import Console
 
-from brain.config import DATA_DIR, LLM_API_BASE, LLM_API_KEY, LLM_MODEL, DEDUP_TOP_N, EMBED_DIMENSIONS
+from brain.config import (
+    DATA_DIR,
+    LLM_API_BASE,
+    LLM_API_KEY,
+    LLM_MODEL,
+    LLM_TIMEOUT_SECONDS,
+    DEDUP_TOP_N,
+    EMBED_DIMENSIONS,
+)
 from brain.models import PatternCard, FrequencyProfile
 from brain.prompts import render_prompt
 
 # 模块级单例，避免每次调用重建连接池
-_client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY)
+_client = OpenAI(base_url=LLM_API_BASE, api_key=LLM_API_KEY, timeout=LLM_TIMEOUT_SECONDS)
 _console = Console()
 
 # File logger for full LLM responses (background log, not printed to console)

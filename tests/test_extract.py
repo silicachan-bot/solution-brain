@@ -5,28 +5,83 @@ from datetime import datetime
 
 import pytest
 
-from brain.models import CleanedComment, PatternCard, FrequencyProfile
-from brain.extract.chunker import chunk_comments
+from brain.models import CleanedComment, CommentPair, PatternCard, FrequencyProfile
+from brain.extract.chunker import build_comment_pairs, chunk_comments, format_comment_pair
 from brain.extract.refiner import extract_from_chunk, _judge_duplicate_topn, deduplicate_and_merge
 from brain.prompts import load_prompt
 
 
-def _make_comment(rpid: int, message: str) -> CleanedComment:
-    return CleanedComment(rpid=rpid, bvid="BV1test", uid=1, message=message, ctime=1700000000)
+def _make_comment(
+    rpid: int,
+    message: str,
+    *,
+    root: int = 0,
+    parent: int = 0,
+) -> CleanedComment:
+    return CleanedComment(
+        rpid=rpid,
+        bvid="BV1test",
+        uid=1,
+        uname=f"user-{rpid}",
+        message=message,
+        ctime=1700000000 + rpid,
+        root=root,
+        parent=parent,
+    )
 
 
 class TestChunker:
+    def test_builds_parent_reply_pairs(self):
+        comments = [
+            _make_comment(1, "root"),
+            _make_comment(2, "reply", root=1, parent=1),
+            _make_comment(3, "nested reply", root=1, parent=2),
+            _make_comment(4, "standalone"),
+        ]
+        pairs = build_comment_pairs(comments)
+
+        assert len(pairs) == 2
+        assert pairs[0].parent.rpid == 1
+        assert pairs[0].reply.rpid == 2
+        assert pairs[1].parent.rpid == 2
+        assert pairs[1].reply.rpid == 3
+
+    def test_ignores_replies_with_missing_parent(self):
+        comments = [
+            _make_comment(2, "reply", root=1, parent=1),
+        ]
+        assert build_comment_pairs(comments) == []
+
+    def test_formats_comment_pair(self):
+        pair = CommentPair(
+            parent=_make_comment(1, "上文"),
+            reply=_make_comment(2, "回复", root=1, parent=1),
+        )
+        assert format_comment_pair(pair) == "上文评论：上文\n回复评论：回复"
+
     def test_basic_chunking(self):
-        comments = [_make_comment(i, f"comment number {i}") for i in range(120)]
-        chunks = chunk_comments(comments, chunk_size=50)
+        pairs = [
+            CommentPair(
+                parent=_make_comment(i, f"parent {i}"),
+                reply=_make_comment(i + 1000, f"reply {i}", root=i, parent=i),
+            )
+            for i in range(120)
+        ]
+        chunks = chunk_comments(pairs, chunk_size=50)
         assert len(chunks) == 3
         assert len(chunks[0]) == 50
         assert len(chunks[1]) == 50
         assert len(chunks[2]) == 20
 
     def test_small_input(self):
-        comments = [_make_comment(i, f"comment {i}") for i in range(10)]
-        chunks = chunk_comments(comments, chunk_size=50)
+        pairs = [
+            CommentPair(
+                parent=_make_comment(i, f"parent {i}"),
+                reply=_make_comment(i + 100, f"reply {i}", root=i, parent=i),
+            )
+            for i in range(10)
+        ]
+        chunks = chunk_comments(pairs, chunk_size=50)
         assert len(chunks) == 1
         assert len(chunks[0]) == 10
 
@@ -35,9 +90,14 @@ class TestChunker:
         assert chunks == []
 
     def test_returns_message_strings(self):
-        comments = [_make_comment(1, "hello world")]
-        chunks = chunk_comments(comments, chunk_size=50)
-        assert chunks == [["hello world"]]
+        pairs = [
+            CommentPair(
+                parent=_make_comment(1, "hello"),
+                reply=_make_comment(2, "world", root=1, parent=1),
+            )
+        ]
+        chunks = chunk_comments(pairs, chunk_size=50)
+        assert chunks == [["上文评论：hello\n回复评论：world"]]
 
 
 class TestExtractFromChunk:
@@ -73,11 +133,15 @@ class TestExtractFromChunk:
             "brain.extract.refiner._call_llm_streaming",
             return_value=("[]", 5, 3),
         ) as mock_call:
-            extract_from_chunk(["first", "second"])
+            extract_from_chunk([
+                "上文评论：first parent\n回复评论：first reply",
+                "上文评论：second parent\n回复评论：second reply",
+            ])
 
         rendered_prompt = mock_call.call_args.args[0]
-        assert "1. first" in rendered_prompt
-        assert "2. second" in rendered_prompt
+        assert "1. 上文评论：first parent\n回复评论：first reply" in rendered_prompt
+        assert "2. 上文评论：second parent\n回复评论：second reply" in rendered_prompt
+        assert "评论对" in rendered_prompt
         assert "{{ comments }}" not in rendered_prompt
 
 
@@ -210,6 +274,7 @@ class TestPromptLoader:
     def test_loads_extract_prompts(self):
         assert "JSON 数组" in load_prompt("extract_patterns.txt")
         assert "duplicate_of" in load_prompt("extract_dedup_judge.txt")
+        assert "回复评论" in load_prompt("extract_patterns.txt")
 
 
 @pytest.mark.skipif(
@@ -218,18 +283,13 @@ class TestPromptLoader:
 )
 class TestExtractIntegration:
     def test_real_extraction(self):
-        """Smoke test: send real comments to LLM and check output structure."""
+        """Smoke test: send real comment pairs to LLM and check output structure."""
         comments = [
-            "这也行...好家伙...",
-            "又来了...好家伙...",
-            "绝了...好家伙...",
-            "笑死我了",
-            "前方高能",
-            "你说得对，但是这个视频确实不错",
-            "up主下次还敢",
-            "建议下次不要建议了",
-            "太真实了",
-            "我直接好家伙",
+            "上文评论：这视频也太离谱了\n回复评论：这也行...好家伙...",
+            "上文评论：又来这一套\n回复评论：又来了...好家伙...",
+            "上文评论：这也能圆回来？\n回复评论：绝了...好家伙...",
+            "上文评论：你觉得靠谱吗\n回复评论：建议下次不要建议了",
+            "上文评论：这操作太草了\n回复评论：太真实了",
         ]
         cards, _ = extract_from_chunk(comments)
         assert isinstance(cards, list)

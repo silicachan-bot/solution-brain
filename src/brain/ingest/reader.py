@@ -29,7 +29,8 @@ class BilibiliReader:
         conn = self._connect()
         try:
             cur = conn.execute(
-                "SELECT rpid, bvid, uid, message, ctime FROM comments WHERE bvid = ? ORDER BY ctime",
+                "SELECT rpid, bvid, uid, uname, message, ctime, root, parent "
+                "FROM comments WHERE bvid = ? ORDER BY ctime",
                 (bvid,),
             )
             return [
@@ -37,8 +38,11 @@ class BilibiliReader:
                     rpid=row["rpid"],
                     bvid=row["bvid"],
                     uid=row["uid"],
+                    uname=row["uname"] or "",
                     message=row["message"],
                     ctime=row["ctime"],
+                    root=row["root"] or 0,
+                    parent=row["parent"] or 0,
                 )
                 for row in cur.fetchall()
             ]

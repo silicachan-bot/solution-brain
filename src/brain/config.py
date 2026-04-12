@@ -24,6 +24,7 @@ BILIBILI_DB_PATH = Path(
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "60"))
 
 # Embedding API (Qwen3-Embedding-4B via SiliconFlow, OpenAI-compatible)
 EMBED_API_BASE = os.environ.get("EMBED_API_BASE", "https://api.siliconflow.cn/v1")
