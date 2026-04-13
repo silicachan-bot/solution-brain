@@ -52,30 +52,29 @@ EMBED_DIMENSIONS = int(os.environ.get("EMBED_DIMENSIONS", "2048"))
 #   这些是程序行为的一部分，不含敏感信息，可随代码提交。
 #   如需在不同环境快速切换，也可在 .env 中覆盖同名变量。
 
-# LLM 调用超时秒数；网络较慢时可适当调大
-LLM_TIMEOUT_SECONDS: float = 60
-
+# --- 摄入 ---
 # 评论最短字数；过短的评论（纯表情、回复符号等）直接过滤
 MIN_COMMENT_LENGTH: int = 5
 
+# --- 提取 ---
+# LLM 调用超时秒数；网络较慢时可适当调大
+LLM_TIMEOUT_SECONDS: float = 60
 # 每块包含的评论对数量；越大单次 LLM 调用的上下文越丰富，token 消耗也越高
 CHUNK_SIZE: int = 100
-
 # 每个视频最多处理的块数（0 = 全部）；用于控制高评论量视频的处理深度
 MAX_CHUNKS_PER_VIDEO: int = 3
 
+# --- 检索 ---
 # retrieve_patterns() 默认返回的模式数量上限
 RETRIEVAL_TOP_K: int = 8
-
 # 综合检索得分 = 向量相似度 × SIMILARITY_WEIGHT + freshness × FRESHNESS_WEIGHT
 SIMILARITY_WEIGHT: float = 0.6
 FRESHNESS_WEIGHT: float = 0.4
 
-# 去重双路向量检索各取 top-N 候选，再进入 LLM 判重或自动合并
+# --- 去重 ---
+# 双路向量检索各取 top-N 候选，再进入 LLM 判重或自动合并
 DEDUP_TOP_N: int = 3
-
 # 相似度低于此阈值的候选直接忽略，不进入后续判重
 DEDUP_SIMILARITY_THRESHOLD: float = 0.8
-
 # 相似度高于此阈值时直接自动合并，跳过 LLM 调用
 DEDUP_AUTO_MERGE_THRESHOLD: float = 0.9
