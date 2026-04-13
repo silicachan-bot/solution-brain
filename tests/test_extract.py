@@ -441,7 +441,8 @@ class TestIntraBatchDedup:
         card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
         card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
         with patch("brain.extract.refiner._judge_duplicate_topn", return_value=(None, 0)):
-            result, _ = _dedup_intra_batch([card_a, card_b], embedder, top_n=3)
+            # auto_merge_threshold>1.0 禁止自动合并，让 LLM 判断（mocked 返回无重复）
+            result, _ = _dedup_intra_batch([card_a, card_b], embedder, top_n=3, auto_merge_threshold=1.1)
         assert len(result) == 2
 
     def test_examples_merged_from_both(self):
@@ -490,8 +491,26 @@ class TestIntraBatchDedup:
                     embedder,
                     top_n=3,
                     similarity_threshold=0.8,
+                    auto_merge_threshold=1.1,  # >1.0，MockEmbedder 最高相似度为 1.0，强制走 LLM
                 )
         mock_judge.assert_called_once()
+
+    def test_auto_merge_threshold_skips_llm(self):
+        embedder = MockEmbedder()
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        card_a = self._make_card("1", same_tmpl, description=same_desc, examples=same_ex)
+        card_b = self._make_card("2", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn") as mock_judge:
+            with patch("brain.extract.refiner._enrich_description", return_value=("增补描述", 0)):
+                result, _ = _dedup_intra_batch(
+                    [card_a, card_b],
+                    embedder,
+                    top_n=3,
+                    similarity_threshold=0.8,
+                    auto_merge_threshold=0.0,  # 所有候选都触发自动合并
+                )
+        mock_judge.assert_not_called()
+        assert len(result) == 1
 
 
 class TestCrossDbDedup:
@@ -621,3 +640,27 @@ class TestCrossDbDedup:
         assert len(new) == 1
         assert len(updates) == 0
         mock_judge.assert_not_called()
+
+    def test_auto_merge_threshold_skips_llm(self, tmp_path):
+        db = PatternDB(tmp_path / "lance", embedder=MockEmbedder())
+        same_tmpl, same_desc, same_ex = "[A]好家伙", "吐槽表达", ["好家伙"]
+        existing = self._make_card("existing-1", same_tmpl, description=same_desc, examples=same_ex)
+        existing.frequency = FrequencyProfile(5, 5, 5, 5)
+        db.save([existing])
+
+        new_card = self._make_card("new-1", same_tmpl, description=same_desc, examples=same_ex)
+        with patch("brain.extract.refiner._judge_duplicate_topn") as mock_judge:
+            with patch("brain.extract.refiner._enrich_description", return_value=("增补描述", 0)):
+                new, updates, tokens = _dedup_against_db(
+                    [new_card],
+                    db,
+                    top_n=3,
+                    similarity_threshold=0.8,
+                    auto_merge_threshold=0.0,  # 触发自动合并
+                )
+
+        mock_judge.assert_not_called()
+        assert len(new) == 0
+        assert len(updates) == 1
+        assert updates[0].id == "existing-1"
+        assert updates[0].frequency.total == 6
