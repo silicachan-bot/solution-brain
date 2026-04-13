@@ -42,18 +42,21 @@
 uv sync
 ```
 
-复制环境变量模板：
+复制环境变量模板并填写 API 密钥：
 
 ```bash
 cp .env.example .env
 ```
 
-至少配置：
+`.env` 只需填两类内容：
 
-```env
-LLM_API_KEY=你的提取模型 API key
-EMBED_API_KEY=你的嵌入模型 API key
-```
+| 类型 | 示例 |
+|---|---|
+| API 密钥（必填） | `LLM_API_KEY`、`EMBED_API_KEY` |
+| 端点与模型名（按需修改） | `LLM_API_BASE`、`LLM_MODEL`、`EMBED_MODEL` 等 |
+
+算法参数（`CHUNK_SIZE`、去重阈值、`MAX_CHUNKS_PER_VIDEO` 等）**不需要写入 `.env`**，
+默认值和注释都在 [`src/brain/config.py`](src/brain/config.py) 中，直接编辑代码即可。
 
 ## 可运行脚本
 

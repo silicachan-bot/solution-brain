@@ -6,6 +6,7 @@
     uv run python scripts/run_pipeline.py --full             # 全量重跑
     uv run python scripts/run_pipeline.py --limit 5          # 限制处理N个视频
     uv run python scripts/run_pipeline.py --chunk-size 30    # 每块评论数
+    uv run python scripts/run_pipeline.py --max-chunks 5     # 每视频最多N块（默认来自 config）
     uv run python scripts/run_pipeline.py --dry-run          # 只看计划不调LLM
 """
 from __future__ import annotations
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from tqdm import tqdm
 
-from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, STATE_FILE
+from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, MAX_CHUNKS_PER_VIDEO, STATE_FILE
 from brain.ingest.reader import BilibiliReader
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.state import WatermarkState
@@ -34,7 +35,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="最多处理N个视频（0=全部）")
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE, help="每块评论数")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不调用LLM")
-    parser.add_argument("--max-chunks", type=int, default=0, help="每个视频最多处理N块（0=全部）")
+    parser.add_argument("--max-chunks", type=int, default=MAX_CHUNKS_PER_VIDEO, help="每个视频最多处理N块（0=全部）")
     args = parser.parse_args()
 
     reader = BilibiliReader(BILIBILI_DB_PATH)
