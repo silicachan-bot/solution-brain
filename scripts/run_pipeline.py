@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="最多处理N个视频（0=全部）")
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE, help="每块评论数")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不调用LLM")
+    parser.add_argument("--max-chunks", type=int, default=0, help="每个视频最多处理N块（0=全部）")
     args = parser.parse_args()
 
     reader = BilibiliReader(BILIBILI_DB_PATH)
@@ -67,6 +68,8 @@ def main():
             cleaned = clean_comments(comments)
             comment_pairs = build_comment_pairs(cleaned)
             chunks = chunk_comments(comment_pairs, chunk_size=args.chunk_size)
+            if args.max_chunks > 0:
+                chunks = chunks[: args.max_chunks]
             print(f"[{i}/{len(videos)}] {bvid} — {video.get('title','无标题')}")
             print(
                 f"  评论: {len(comments)} → 清洗后: {len(cleaned)} "
@@ -95,6 +98,9 @@ def main():
 
         pair_chunks = chunk_comment_pairs(comment_pairs, chunk_size=args.chunk_size)
         chunks = chunk_comments(comment_pairs, chunk_size=args.chunk_size)
+        if args.max_chunks > 0:
+            pair_chunks = pair_chunks[: args.max_chunks]
+            chunks = chunks[: args.max_chunks]
 
         video_tokens = 0
         video_patterns: list = []
