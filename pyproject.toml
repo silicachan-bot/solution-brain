@@ -10,7 +10,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
     "streamlit>=1.44.0",
+    "tqdm>=4.67.3",
 ]
+
+[project.scripts]
+brain-patterns = "brain.streamlit_launcher:main"
 
 [project.optional-dependencies]
 dev = [
