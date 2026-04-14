@@ -33,10 +33,10 @@ uv run python scripts/run_pipeline.py --full
 全量重跑，忽略水位线。
 
 ```bash
-uv run python scripts/run_pipeline.py --limit 5
+uv run python scripts/run_pipeline.py --max-chunks 5
 ```
 
-只处理前 5 个视频，适合测试。
+每个视频最多处理前 5 块评论对，适合控制成本做小规模验证。
 
 ```bash
 uv run python scripts/run_pipeline.py --chunk-size 30
@@ -114,23 +114,23 @@ uv run --with pytest pytest -q
 再做 dry-run：
 
 ```bash
-uv run python scripts/run_pipeline.py --dry-run --limit 1
+uv run python scripts/run_pipeline.py --dry-run --max-chunks 1
 ```
 
 如果 dry-run 正常，再做真实提取：
 
 ```bash
-uv run python scripts/run_pipeline.py --limit 3
+uv run python scripts/run_pipeline.py --max-chunks 3
 ```
 
-建议先从 `--limit 1` 或 `--limit 3` 开始，不要一上来全量跑。
+建议先从 `--max-chunks 1` 或 `--max-chunks 3` 开始，不要一上来放开所有评论块。
 
 ## 5. 本次已验证结果
 
 已验证：
 
 - `uv run --with pytest pytest -q` → **41 passed, 1 skipped**
-- `uv run python scripts/run_pipeline.py --dry-run --limit 1` → **可正常读取数据库、清洗评论、分块**
+- `uv run python scripts/run_pipeline.py --dry-run --max-chunks 1` → **可正常读取数据库、清洗评论、分块**
 
 其中 `1 skipped` 是真实 LLM 集成测试，只有设置 `LLM_API_KEY` 后才会运行。
 
@@ -148,7 +148,7 @@ uv run python scripts/run_pipeline.py --limit 3
 建议按这个顺序继续：
 
 1. 在 `.env` 里填好真实 API key
-2. 跑 `uv run python scripts/run_pipeline.py --limit 3`
+2. 跑 `uv run python scripts/run_pipeline.py --max-chunks 3`
 3. 检查提取出的 PatternCard 质量
 4. 根据结果微调 `src/brain/extract/refiner.py`
 5. 再实现 API 层，把 compose 输出接到 bot

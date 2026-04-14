@@ -53,14 +53,14 @@
 
 - `--full`
   - 忽略水位线，全量重跑
-- `--limit`
-  - 最多处理多少个视频
 - `--chunk-size`
   - 覆盖默认分块大小
+- `--max-chunks`
+  - 限制每个视频最多处理多少块评论对
 - `--dry-run`
   - 只跑到分块阶段，不调用 LLM，不写库
 
-参数定义见 [scripts/run_pipeline.py:28-32](../../scripts/run_pipeline.py#L28-L32)。
+参数定义见 [scripts/run_pipeline.py:31-36](../../scripts/run_pipeline.py#L31-L36)。
 
 ## 4. 输入与输出
 
@@ -94,21 +94,18 @@
 2. 初始化 reader / state / embedder / db（PatternDB(LANCEDB_DIR, embedder=embedder)）
 3. 读取视频列表
 4. 如果不是 --full，则按 watermark 过滤视频
-5. 如果设置了 --limit，则截断视频列表
-6. 对每个视频：
-   6.1 读取评论
-   6.2 清洗评论
-   6.3 分块
-   6.4 若不是 dry-run，则逐块调 LLM 提取
-7. 汇总所有 PatternCard
-8. 打印原始模式数量与 db.count() 已有数量
-9. 调用 deduplicate_and_merge(all_patterns, db, embedder)，两阶段去重（有 Rich 日志输出）
-10. 保存 new_cards，更新 updates
-11. 把最后一个 bvid 写入 watermark
-12. 打印完成信息与 db.count() 最终总数
+5. 对每个视频：
+   5.1 读取评论
+   5.2 清洗评论
+   5.3 构造评论对并分块
+   5.4 如果设置了 --max-chunks，则截断当前视频的块数
+   5.5 若不是 dry-run，则逐块调 LLM 提取
+   5.6 对当前视频提取结果执行去重并立即写库
+   5.7 更新当前视频的 watermark，支持断点续跑
+6. 打印完成信息与 db.count() 最终总数
 ```
 
-其中 dry-run 分支在 [scripts/run_pipeline.py:76-88](../../scripts/run_pipeline.py#L76-L88)。
+其中 dry-run 分支在 [scripts/run_pipeline.py:58-73](../../scripts/run_pipeline.py#L58-L73)。
 
 ## 6. 依赖关系
 

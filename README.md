@@ -63,7 +63,7 @@ cp .env.example .env
 ### 1. 运行提取 pipeline
 
 ```bash
-uv run python scripts/run_pipeline.py --limit 3
+uv run python scripts/run_pipeline.py --dry-run --max-chunks 1
 ```
 
 ### 2. 打开 PatternCard 查看器

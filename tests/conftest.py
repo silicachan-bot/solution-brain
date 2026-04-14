@@ -9,7 +9,6 @@ from helpers import MockEmbedder
 def patch_embed_dimensions(monkeypatch):
     monkeypatch.setattr("brain.config.EMBED_DIMENSIONS", MockEmbedder.DIM)
     monkeypatch.setattr("brain.store.pattern_db.EMBED_DIMENSIONS", MockEmbedder.DIM)
-    monkeypatch.setattr("brain.extract.refiner.EMBED_DIMENSIONS", MockEmbedder.DIM)
 
 
 @pytest.fixture

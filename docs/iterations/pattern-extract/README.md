@@ -25,7 +25,7 @@
 bash scripts/clear_and_eval.sh BV11qx4zAEPz BV128GbzBEjD BV11MbhzJEtb
 
 # 全量 pipeline（不清库）
-uv run python scripts/run_pipeline.py --limit 3 --full
+uv run python scripts/run_pipeline.py --max-chunks 3 --full
 ```
 
 ## 文档列表

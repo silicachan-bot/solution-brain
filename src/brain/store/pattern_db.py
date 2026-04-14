@@ -91,6 +91,22 @@ class PatternDB:
             return 0
         return self._table.count_rows()
 
+    def query_by_vec(
+        self, vec: list[float], column: str, top_k: int,
+    ) -> list[tuple[PatternCard, float]]:
+        """按预计算向量检索指定列，返回 (card, similarity) 列表。"""
+        if self._table is None or self._table.count_rows() == 0:
+            return []
+        n = min(top_k, self._table.count_rows())
+        results = self._table.search(vec, vector_column_name=column) \
+            .metric("cosine") \
+            .limit(n) \
+            .to_list()
+        return [
+            (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
+            for r in results
+        ]
+
     def query_by_template(
         self, text: str, top_k: int = 3,
     ) -> list[tuple[PatternCard, float]]:

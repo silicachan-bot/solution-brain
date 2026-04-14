@@ -8,11 +8,6 @@ from collections.abc import Callable
 from datetime import datetime
 
 from openai import OpenAI
-
-import tempfile
-
-import lancedb
-import pyarrow as pa
 from tqdm import tqdm
 
 from brain.config import (
@@ -20,7 +15,6 @@ from brain.config import (
     DEDUP_AUTO_MERGE_THRESHOLD,
     DEDUP_SIMILARITY_THRESHOLD,
     DEDUP_TOP_N,
-    EMBED_DIMENSIONS,
     LLM_API_BASE,
     LLM_API_KEY,
     LLM_MODEL,
@@ -233,6 +227,13 @@ def extract_from_chunk(
     return cards, total_tokens
 
 
+def _filter_hits_by_similarity(
+    hits: list[tuple[PatternCard, float]],
+    threshold: float,
+) -> list[tuple[PatternCard, float]]:
+    return [(card, score) for card, score in hits if score >= threshold]
+
+
 def _merge_hits(
     hits_a: list[tuple[PatternCard, float]],
     hits_b: list[tuple[PatternCard, float]],
@@ -243,14 +244,6 @@ def _merge_hits(
         if card.id not in seen:
             seen[card.id] = card
     return list(seen.values())
-
-
-def _filter_hits_by_similarity(
-    hits: list[tuple[PatternCard, float]],
-    threshold: float,
-) -> list[tuple[PatternCard, float]]:
-    """仅保留达到相似度阈值的候选。"""
-    return [(card, score) for card, score in hits if score >= threshold]
 
 
 def _find_best_hit(
@@ -267,225 +260,166 @@ def _find_best_hit(
     return max(best.values(), key=lambda x: x[1])
 
 
-def _dedup_intra_batch(
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    return dot / (norm_a * norm_b) if norm_a * norm_b > 0 else 0.0
+
+
+def _search_accepted(
+    vec_t: list[float],
+    vec_s: list[float],
+    accepted: list[PatternCard],
+    accepted_vecs_t: list[list[float]],
+    accepted_vecs_s: list[list[float]],
+    top_n: int,
+) -> list[tuple[PatternCard, float]]:
+    """在已接受的卡片中做 in-memory 余弦检索，返回 (card, best_sim) 列表。"""
+    best: dict[str, tuple[PatternCard, float]] = {}
+    for card, vt, vs in zip(accepted, accepted_vecs_t, accepted_vecs_s):
+        sim = max(_cosine_sim(vec_t, vt), _cosine_sim(vec_s, vs))
+        if card.id not in best or sim > best[card.id][1]:
+            best[card.id] = (card, sim)
+    return sorted(best.values(), key=lambda x: x[1], reverse=True)[:top_n]
+
+
+def _resolve_target(
+    matched: PatternCard,
+    accepted: list[PatternCard],
+    updates_by_id: dict[str, PatternCard],
+) -> PatternCard:
+    """找到可以原地修改的 target 对象；DB 来源的首次命中会加入 updates_by_id。"""
+    if matched.id in updates_by_id:
+        return updates_by_id[matched.id]
+    for c in accepted:
+        if c.id == matched.id:
+            return c
+    updates_by_id[matched.id] = matched
+    return matched
+
+
+def _refresh_accepted_vectors(
+    target: PatternCard,
+    accepted: list[PatternCard],
+    accepted_vecs_t: list[list[float]],
+    accepted_vecs_s: list[list[float]],
+    embedder,
+) -> None:
+    """若 target 属于本批新增卡片，合并后同步刷新其缓存向量。"""
+    for i, accepted_card in enumerate(accepted):
+        if accepted_card.id != target.id:
+            continue
+        accepted_vecs_t[i] = embedder.embed([target.template])[0]
+        accepted_vecs_s[i] = embedder.embed([target.embed_text()])[0]
+        return
+
+
+def _dedup_single_pass(
     cards: list[PatternCard],
+    db,
     embedder,
     top_n: int = DEDUP_TOP_N,
     similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
     auto_merge_threshold: float = DEDUP_AUTO_MERGE_THRESHOLD,
-) -> tuple[list[PatternCard], int]:
-    """批次内去重：双路向量检索 + LLM 判重。
-    返回 (kept_cards, total_tokens)。
-    """
-    total_tokens = 0
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_db = lancedb.connect(tmp_dir)
-        schema = pa.schema([
-            pa.field("id", pa.string()),
-            pa.field("json", pa.string()),
-            pa.field("vec_template", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
-            pa.field("vec_semantic", pa.list_(pa.float32(), EMBED_DIMENSIONS)),
-        ])
-        tmp_table = None
-        kept: dict[str, PatternCard] = {}
-
-        pbar = tqdm(cards, desc="批次内去重", unit="条", leave=False)
-        for card in pbar:
-            pbar.set_description(f"批次内去重 {card.template[:18]!r}")
-            t0 = time.perf_counter()
-            vec_t = embedder.embed([card.template])[0]
-            vec_s = embedder.embed([card.embed_text()])[0]
-            t_embed = time.perf_counter() - t0
-
-            row = {
-                "id": card.id,
-                "json": json.dumps(card.to_dict(), ensure_ascii=False),
-                "vec_template": vec_t,
-                "vec_semantic": vec_s,
-            }
-
-            if tmp_table is None:
-                tmp_table = tmp_db.create_table("batch", [row], schema=schema)
-                kept[card.id] = card
-                tqdm.write(f"  批次内 {card.template!r}  embed {t_embed*1000:.0f}ms  首条入库")
-                pbar.set_postfix(kept=len(kept), tokens=f"{total_tokens/1000:.1f}k")
-                continue
-
-            n = min(top_n, tmp_table.count_rows())
-            hits_tmpl = [
-                (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
-                for r in tmp_table.search(vec_t, vector_column_name="vec_template")
-                    .metric("cosine").limit(n).to_list()
-            ]
-            hits_sem = [
-                (PatternCard.from_dict(json.loads(r["json"])), 1.0 - r["_distance"])
-                for r in tmp_table.search(vec_s, vector_column_name="vec_semantic")
-                    .metric("cosine").limit(n).to_list()
-            ]
-            filtered_tmpl = _filter_hits_by_similarity(hits_tmpl, similarity_threshold)
-            filtered_sem = _filter_hits_by_similarity(hits_sem, similarity_threshold)
-            merged = _merge_hits(filtered_tmpl, filtered_sem)
-
-            tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl)
-            sem_str  = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem)
-            tqdm.write(f"  批次内 {card.template!r}  embed {t_embed*1000:.0f}ms")
-            tqdm.write(f"    tmpl: {tmpl_str}")
-            tqdm.write(f"    sem:  {sem_str}")
-
-            if not merged:
-                tqdm.write(f"    → 阈值过滤后无候选，直接保留")
-                tmp_table.add([row])
-                kept[card.id] = card
-                pbar.set_postfix(kept=len(kept), tokens=f"{total_tokens/1000:.1f}k")
-                continue
-
-            # 高相似度自动合并，跳过 LLM
-            best_hit = _find_best_hit(filtered_tmpl, filtered_sem)
-            if best_hit and best_hit[1] >= auto_merge_threshold:
-                matched, best_score = best_hit
-                target = kept[matched.id]
-                _merge_into(target, card)
-                new_desc, enrich_tokens = _enrich_description(target, card)
-                target.description = new_desc
-                total_tokens += enrich_tokens
-                new_vec_s = embedder.embed([target.embed_text()])[0]
-                tmp_table.merge_insert("id") \
-                    .when_matched_update_all() \
-                    .when_not_matched_insert_all() \
-                    .execute([{
-                        "id": target.id,
-                        "json": json.dumps(target.to_dict(), ensure_ascii=False),
-                        "vec_template": embedder.embed([target.template])[0],
-                        "vec_semantic": new_vec_s,
-                    }])
-                tqdm.write(
-                    f"    → 相似度 {best_score:.3f} ≥ {auto_merge_threshold}，自动合并 {matched.template!r}"
-                )
-                pbar.set_postfix(kept=len(kept), tokens=f"{total_tokens/1000:.1f}k")
-                continue
-
-            tqdm.write(f"    → 候选 {len(merged)} 个，LLM 判断中…")
-            t1 = time.perf_counter()
-            dup_idx, judge_tokens = _judge_duplicate_topn(card, merged)
-            total_tokens += judge_tokens
-            t_llm = time.perf_counter() - t1
-
-            if dup_idx is not None:
-                matched = merged[dup_idx]
-                target = kept[matched.id]
-                _merge_into(target, card)
-                new_desc, enrich_tokens = _enrich_description(target, card)
-                target.description = new_desc
-                total_tokens += enrich_tokens
-                new_vec_s = embedder.embed([target.embed_text()])[0]
-                tmp_table.merge_insert("id") \
-                    .when_matched_update_all() \
-                    .when_not_matched_insert_all() \
-                    .execute([{
-                        "id": target.id,
-                        "json": json.dumps(target.to_dict(), ensure_ascii=False),
-                        "vec_template": embedder.embed([target.template])[0],
-                        "vec_semantic": new_vec_s,
-                    }])
-                tqdm.write(
-                    f"    → LLM {t_llm:.1f}s: 与 {matched.template!r} 重复，例句合并+描述增补"
-                )
-                pbar.set_postfix(kept=len(kept), tokens=f"{total_tokens/1000:.1f}k")
-                continue
-
-            tqdm.write(f"    → LLM {t_llm:.1f}s: 无重复，保留")
-            tmp_table.add([row])
-            kept[card.id] = card
-            pbar.set_postfix(kept=len(kept), tokens=f"{total_tokens/1000:.1f}k")
-
-    return list(kept.values()), total_tokens
-
-
-def _dedup_against_db(
-    cards: list[PatternCard],
-    db,
-    top_n: int = DEDUP_TOP_N,
-    similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
-    auto_merge_threshold: float = DEDUP_AUTO_MERGE_THRESHOLD,
 ) -> tuple[list[PatternCard], list[PatternCard], int]:
-    """入库前去重：双路向量检索 + LLM 判重。
-    返回 (new_cards, updates, total_tokens)。
+    """单阶段去重：批量 embed 后，逐张同时检索 DB 和本批已接受卡片。
+    返回 (new_cards, updated_existing_cards, total_tokens)。
     """
+    if not cards:
+        return [], [], 0
+
     total_tokens = 0
-    new_cards: list[PatternCard] = []
+
+    # 1. 批量 embed（2 次 API 调用处理整批）
+    vecs_t = embedder.embed([c.template for c in cards])
+    vecs_s = embedder.embed([c.embed_text() for c in cards])
+
+    accepted: list[PatternCard] = []
+    accepted_vecs_t: list[list[float]] = []
+    accepted_vecs_s: list[list[float]] = []
     updates_by_id: dict[str, PatternCard] = {}
 
-    pbar = tqdm(cards, desc="入库去重", unit="条", leave=False)
-    for card in pbar:
-        pbar.set_description(f"入库去重 {card.template[:18]!r}")
-        t0 = time.perf_counter()
-        hits_tmpl = db.query_by_template(card.template, top_k=top_n)
-        t_tmpl = time.perf_counter() - t0
+    pbar = tqdm(
+        zip(cards, vecs_t, vecs_s),
+        total=len(cards),
+        desc="去重",
+        unit="条",
+        leave=False,
+    )
+    for card, vec_t, vec_s in pbar:
+        pbar.set_description(f"去重 {card.template[:18]!r}")
 
-        t1 = time.perf_counter()
-        hits_sem = db.query_by_semantic(card.embed_text(), top_k=top_n)
-        t_sem = time.perf_counter() - t1
+        # 2. 检索 DB
+        hits_db_t = _filter_hits_by_similarity(
+            db.query_by_vec(vec_t, "vec_template", top_n), similarity_threshold
+        )
+        hits_db_s = _filter_hits_by_similarity(
+            db.query_by_vec(vec_s, "vec_semantic", top_n), similarity_threshold
+        )
 
-        filtered_tmpl = _filter_hits_by_similarity(hits_tmpl, similarity_threshold)
-        filtered_sem = _filter_hits_by_similarity(hits_sem, similarity_threshold)
+        # 3. 检索本批已接受卡片（in-memory）
+        hits_acc = _filter_hits_by_similarity(
+            _search_accepted(vec_t, vec_s, accepted, accepted_vecs_t, accepted_vecs_s, top_n),
+            similarity_threshold,
+        )
 
-        if not filtered_tmpl and not filtered_sem:
-            tqdm.write(
-                f"  入库 {card.template!r}  检索 {(t_tmpl+t_sem)*1000:.0f}ms  无候选，直接新增"
-            )
-            new_cards.append(card)
-            pbar.set_postfix(new=len(new_cards), upd=len(updates_by_id), tokens=f"{total_tokens/1000:.1f}k")
+        if not hits_db_t and not hits_db_s and not hits_acc:
+            tqdm.write(f"  {card.template!r}  无候选，新增")
+            accepted.append(card)
+            accepted_vecs_t.append(vec_t)
+            accepted_vecs_s.append(vec_s)
+            pbar.set_postfix(new=len(accepted), upd=len(updates_by_id))
             continue
 
-        tmpl_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_tmpl) or "(空)"
-        sem_str  = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_sem) or "(空)"
-        tqdm.write(f"  入库 {card.template!r}  tmpl={t_tmpl*1000:.0f}ms sem={t_sem*1000:.0f}ms")
-        tqdm.write(f"    tmpl: {tmpl_str}")
-        tqdm.write(f"    sem:  {sem_str}")
+        db_str  = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_db_t + hits_db_s) or "(空)"
+        acc_str = ", ".join(f"{c.template!r}({s:.3f})" for c, s in hits_acc) or "(空)"
+        tqdm.write(f"  {card.template!r}")
+        tqdm.write(f"    db:  {db_str}")
+        if hits_acc:
+            tqdm.write(f"    acc: {acc_str}")
 
-        # 高相似度自动合并，跳过 LLM
-        best_hit = _find_best_hit(filtered_tmpl, filtered_sem)
+        # 4. 高相似度自动合并，跳过 LLM
+        best_hit = _find_best_hit(hits_db_t + hits_db_s, hits_acc)
         if best_hit and best_hit[1] >= auto_merge_threshold:
             matched, best_score = best_hit
-            target = updates_by_id.get(matched.id, matched)
+            target = _resolve_target(matched, accepted, updates_by_id)
             _merge_into(target, card)
             new_desc, enrich_tokens = _enrich_description(target, card)
             target.description = new_desc
+            _refresh_accepted_vectors(target, accepted, accepted_vecs_t, accepted_vecs_s, embedder)
             total_tokens += enrich_tokens
-            updates_by_id[target.id] = target
-            tqdm.write(
-                f"    → 相似度 {best_score:.3f} ≥ {auto_merge_threshold}，自动合并 {matched.template!r} ({matched.id})"
-            )
-            pbar.set_postfix(new=len(new_cards), upd=len(updates_by_id), tokens=f"{total_tokens/1000:.1f}k")
+            tqdm.write(f"    → 相似度 {best_score:.3f} ≥ {auto_merge_threshold}，自动合并 {matched.template!r}")
+            pbar.set_postfix(new=len(accepted), upd=len(updates_by_id))
             continue
 
-        merged = _merge_hits(filtered_tmpl, filtered_sem)
-        tqdm.write(f"    → 候选 {len(merged)} 个，LLM 判断中…")
-
-        t2 = time.perf_counter()
-        dup_idx, judge_tokens = _judge_duplicate_topn(card, merged)
+        # 5. LLM 判断
+        candidates = _merge_hits(hits_db_t + hits_db_s, hits_acc)
+        tqdm.write(f"    → 候选 {len(candidates)} 个，LLM 判断中…")
+        t0 = time.perf_counter()
+        dup_idx, judge_tokens = _judge_duplicate_topn(card, candidates)
         total_tokens += judge_tokens
-        t_llm = time.perf_counter() - t2
+        t_llm = time.perf_counter() - t0
 
         if dup_idx is not None:
-            matched = merged[dup_idx]
-            target = updates_by_id.get(matched.id, matched)
+            matched = candidates[dup_idx]
+            target = _resolve_target(matched, accepted, updates_by_id)
             _merge_into(target, card)
             new_desc, enrich_tokens = _enrich_description(target, card)
             target.description = new_desc
+            _refresh_accepted_vectors(target, accepted, accepted_vecs_t, accepted_vecs_s, embedder)
             total_tokens += enrich_tokens
-            updates_by_id[target.id] = target
-            tqdm.write(
-                f"    → LLM {t_llm:.1f}s: 与 {matched.template!r} ({matched.id}) 重复，更新已有"
-            )
-            pbar.set_postfix(new=len(new_cards), upd=len(updates_by_id), tokens=f"{total_tokens/1000:.1f}k")
+            tqdm.write(f"    → LLM {t_llm:.1f}s: 与 {matched.template!r} 重复，合并")
+            pbar.set_postfix(new=len(accepted), upd=len(updates_by_id))
             continue
 
         tqdm.write(f"    → LLM {t_llm:.1f}s: 无重复，新增")
-        new_cards.append(card)
-        pbar.set_postfix(new=len(new_cards), upd=len(updates_by_id), tokens=f"{total_tokens/1000:.1f}k")
+        accepted.append(card)
+        accepted_vecs_t.append(vec_t)
+        accepted_vecs_s.append(vec_s)
+        pbar.set_postfix(new=len(accepted), upd=len(updates_by_id))
 
-    return new_cards, list(updates_by_id.values()), total_tokens
+    return accepted, list(updates_by_id.values()), total_tokens
 
 
 def deduplicate_and_merge(
@@ -496,7 +430,7 @@ def deduplicate_and_merge(
     similarity_threshold: float = DEDUP_SIMILARITY_THRESHOLD,
     auto_merge_threshold: float = DEDUP_AUTO_MERGE_THRESHOLD,
 ) -> tuple[list[PatternCard], list[PatternCard], int]:
-    """两阶段去重：批次内相互去重 → 入库前与 DB 比对。
+    """单阶段去重：批量 embed + 同时检索 DB 和本批已接受卡片。
     返回 (new_cards, updated_existing_cards, total_dedup_tokens)。
     """
     tqdm.write(
@@ -504,14 +438,10 @@ def deduplicate_and_merge(
         f"top_n={top_n}, threshold={similarity_threshold:.2f}, auto_merge≥{auto_merge_threshold:.2f}"
     )
 
-    deduped, intra_tokens = _dedup_intra_batch(cards, embedder, top_n, similarity_threshold, auto_merge_threshold)
-    tqdm.write(f"批次内去重完成: {len(cards)} → {len(deduped)} 个  ({intra_tokens} tokens)")
-
-    new_cards, updates, db_tokens = _dedup_against_db(deduped, db, top_n, similarity_threshold, auto_merge_threshold)
-    total_tokens = intra_tokens + db_tokens
-    tqdm.write(
-        f"去重完成: 新增 {len(new_cards)} 个, 更新 {len(updates)} 个  ({db_tokens} tokens)"
+    new_cards, updates, total_tokens = _dedup_single_pass(
+        cards, db, embedder, top_n, similarity_threshold, auto_merge_threshold
     )
+    tqdm.write(f"去重完成: 新增 {len(new_cards)} 个, 更新 {len(updates)} 个  ({total_tokens} tokens)")
 
     return new_cards, updates, total_tokens
 

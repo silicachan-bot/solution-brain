@@ -4,7 +4,6 @@
 用法:
     uv run python scripts/run_pipeline.py                    # 增量处理
     uv run python scripts/run_pipeline.py --full             # 全量重跑
-    uv run python scripts/run_pipeline.py --limit 5          # 限制处理N个视频
     uv run python scripts/run_pipeline.py --chunk-size 30    # 每块评论数
     uv run python scripts/run_pipeline.py --max-chunks 5     # 每视频最多N块（默认来自 config）
     uv run python scripts/run_pipeline.py --dry-run          # 只看计划不调LLM
@@ -32,7 +31,6 @@ from brain.store.embedding import QwenEmbedder
 def main():
     parser = argparse.ArgumentParser(description="运行语言模式提取 pipeline")
     parser.add_argument("--full", action="store_true", help="全量重跑（忽略水位线）")
-    parser.add_argument("--limit", type=int, default=0, help="最多处理N个视频（0=全部）")
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE, help="每块评论数")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不调用LLM")
     parser.add_argument("--max-chunks", type=int, default=MAX_CHUNKS_PER_VIDEO, help="每个视频最多处理N块（0=全部）")
@@ -52,10 +50,6 @@ def main():
     if watermark:
         videos = [v for v in videos if v["bvid"] > watermark]
         tqdm.write(f"水位线过滤后: {len(videos)} 个新视频")
-
-    if args.limit > 0:
-        videos = videos[: args.limit]
-        tqdm.write(f"限制处理: {len(videos)} 个视频")
 
     if not videos:
         tqdm.write("没有需要处理的视频。")
@@ -78,10 +72,10 @@ def main():
             )
         return
 
-    # 3. 逐视频处理
+    # 3. 逐视频处理（每视频去重入库 + 更新水位线，支持断点续跑）
     extract_tokens = 0
+    dedup_tokens = 0
     total_patterns = 0
-    all_patterns: list = []
 
     video_pbar = tqdm(videos, desc="视频", unit="个", position=0)
     for video in video_pbar:
@@ -94,6 +88,7 @@ def main():
         comment_pairs = build_comment_pairs(cleaned)
 
         if not comment_pairs:
+            state.set_watermark("bilibili", bvid)
             video_pbar.set_postfix(pairs=0)
             continue
 
@@ -135,33 +130,28 @@ def main():
             extract_tokens += tokens
             video_patterns.extend(patterns)
             total_patterns += len(patterns)
-            all_patterns.extend(patterns)
             chunk_pbar.set_postfix(tok=tokens, pat=len(patterns))
 
+        # 4. 当前视频去重入库
+        new_cards, updates, video_dedup_tokens = deduplicate_and_merge(video_patterns, db, embedder)
+        db.save(new_cards)
+        db.update(updates)
+        dedup_tokens += video_dedup_tokens
+
+        # 5. 更新水位线（断点）
+        state.set_watermark("bilibili", bvid)
+
         tqdm.write(
-            f"  {bvid}  {len(chunks)} 块  {video_tokens:,} tokens  {len(video_patterns)} 个模式  {title[:30]}"
+            f"  {bvid}  {len(chunks)} 块  {video_tokens:,} tokens"
+            f"  提取 {len(video_patterns)} 个 → 新增 {len(new_cards)} 更新 {len(updates)}"
+            f"  库存 {db.count()}  {title[:30]}"
         )
         video_pbar.set_postfix(
-            tok=f"{extract_tokens/1e6:.3f}M",
-            pat=total_patterns,
+            tok=f"{(extract_tokens + dedup_tokens)/1e6:.3f}M",
+            db=db.count(),
         )
 
     video_pbar.close()
-
-    # 4. 去重合并
-    tqdm.write(f"\n提取到的原始模式: {len(all_patterns)} 个")
-    tqdm.write(f"数据库中已有模式: {db.count()} 个")
-
-    new_cards, updates, dedup_tokens = deduplicate_and_merge(all_patterns, db, embedder)
-
-    db.save(new_cards)
-    db.update(updates)
-
-    # 5. 更新水位线
-    if videos:
-        last_bvid = videos[-1]["bvid"]
-        state.set_watermark("bilibili", last_bvid)
-        tqdm.write(f"水位线更新至: {last_bvid}")
 
     total_tokens = extract_tokens + dedup_tokens
     tqdm.write(
