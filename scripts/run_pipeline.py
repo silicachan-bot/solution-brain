@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from tqdm import tqdm
 
-from brain.config import BILIBILI_DB_PATH, LANCEDB_DIR, CHUNK_SIZE, MAX_CHUNKS_PER_VIDEO, STATE_FILE
+from brain.config import BILIBILI_DB_PATH, PATTERNS_DIR, CHUNK_SIZE, MAX_CHUNKS_PER_VIDEO, STATE_FILE
 from brain.ingest.reader import BilibiliReader
 from brain.ingest.cleaner import clean_comments
 from brain.ingest.state import WatermarkState
@@ -39,7 +39,7 @@ def main():
     reader = BilibiliReader(BILIBILI_DB_PATH)
     state = WatermarkState(STATE_FILE)
     embedder = QwenEmbedder()
-    db = PatternDB(LANCEDB_DIR, embedder=embedder)
+    db = PatternDB(PATTERNS_DIR, embedder=embedder)
 
     # 1. 列出视频
     videos = reader.list_videos()

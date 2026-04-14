@@ -20,7 +20,9 @@ load_dotenv(SOLUTION_BRAIN_DIR / ".env")
 
 DATA_DIR = SOLUTION_BRAIN_DIR / "data"
 STATE_FILE = DATA_DIR / "state.json"
-LANCEDB_DIR = DATA_DIR / "lancedb"
+SOUL_FILE = DATA_DIR / "soul.json"        # Layer 2：bot 自我记忆
+PATTERNS_DIR = DATA_DIR / "patterns"      # Layer 4：语言模式库（LanceDB）
+USERS_DIR = DATA_DIR / "users"            # Layer 3：用户记忆（LanceDB，待实现）
 
 # ── 环境变量（写在 .env，因机器/账号/实验而异） ───────────────────────────────────
 #

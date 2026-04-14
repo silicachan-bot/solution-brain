@@ -8,7 +8,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from brain.compose.menu import build_menu
-from brain.config import LANCEDB_DIR, RETRIEVAL_TOP_K
+from brain.config import PATTERNS_DIR, RETRIEVAL_TOP_K
 from brain.store.pattern_db import PatternDB
 from brain.store.retriever import retrieve_patterns
 from brain.viewer import filter_patterns, format_pattern_summary, group_origins_by_example, sort_patterns
@@ -21,7 +21,7 @@ st.caption("查看 PatternCard 样本，检查提取质量，并测试检索效�
 
 @st.cache_resource
 def get_db() -> PatternDB:
-    return PatternDB(LANCEDB_DIR)
+    return PatternDB(PATTERNS_DIR)
 
 
 def render_pattern_card(card) -> None:
