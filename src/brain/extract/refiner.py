@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from tqdm import tqdm
 
 from brain.config import (
@@ -168,7 +168,12 @@ def extract_from_chunk(
     numbered = "\n".join(f"{i+1}. {m}" for i, m in enumerate(messages))
     prompt = render_prompt("extract_patterns.txt", comments=numbered)
 
-    content, prompt_tokens, completion_tokens = _call_llm_streaming(prompt, on_token=on_token)
+    try:
+        content, prompt_tokens, completion_tokens = _call_llm_streaming(prompt, on_token=on_token)
+    except BadRequestError as e:
+        tqdm.write(f"[{log_label}] 内容过滤拒绝，跳过此块: {e}")
+        _llm_logger.warning("[%s] BadRequestError (content filter), skipping chunk: %s", log_label, e)
+        return [], 0
     content = content.strip()
     total_tokens = prompt_tokens + completion_tokens
 
